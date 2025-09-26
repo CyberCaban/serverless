@@ -1,0 +1,8 @@
+{
+  "name": "hello-world",
+  "innerPort": 3000,
+  "memory": 128,
+  "timeout": 30,
+  "dockerfile": "./Dockerfile",
+  "entrypoint": "hello-world"
+}
