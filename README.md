@@ -36,6 +36,8 @@ Function → Platform: HTTP Response
 Status: 200 OK
 Body: response in JSON
 
+Prereq:
+- tar
 
 
 
