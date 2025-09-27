@@ -36,7 +36,7 @@ impl FunctionManager {
     }
 
     pub async fn read_function_config(path: &str) -> Result<FunctionConfig> {
-        let path = format!("functions/{}/function.json", path);
+        let path = format!("functions/{path}/function.json");
         Ok(FunctionConfig::from_file(path).await?)
     }
 

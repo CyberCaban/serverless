@@ -1,6 +1,6 @@
 use std::{fs, sync::Arc};
 
-use anyhow::{Ok, Result, anyhow, bail};
+use anyhow::{Ok, Result};
 use axum::{
     Router,
     extract::{Path, State},
@@ -57,12 +57,13 @@ async fn main() -> Result<()> {
         let state = AppState::new()?;
         Arc::new(state)
     };
+    let port = 5000;
     let app = Router::new()
         .route("/deploy/{function_name}", post(deploy_function))
         .route("/invoke/{function_name}", post(invoke_function))
         .with_state(state);
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:5000").await?;
-    println!("Running on port 5000");
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
+    println!("Running on port {port}");
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -76,7 +77,12 @@ async fn deploy_function(
         .await
         .map_err(serialize_err)?;
     dbg!(&conf);
-    tokio::task::spawn(async move { state.function_manager.build_function_image(&conf).await });
+    // tokio::task::spawn(async move { state.function_manager.build_function_image(&conf).await });
+    state
+        .function_manager
+        .build_function_image(&conf)
+        .await
+        .map_err(serialize_err)?;
     std::result::Result::Ok(Json(serde_json::json!({
         "status": format!("Deploying {}...", function_name)
     })))

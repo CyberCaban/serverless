@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use std::path::PathBuf;
+
 use anyhow::{Ok, Result, anyhow, bail};
 use bollard::{Docker, body_full, query_parameters::BuildImageOptionsBuilder};
 
@@ -23,7 +25,7 @@ impl ContainerManager {
         let tar_path = self
             .create_build_context(context_path)
             .await
-            .map_err(|e| anyhow!("Failed to create_build_context: {}", e))?;
+            .map_err(|e| anyhow!("Failed to create_build_context: {e}"))?;
         let build_image_options = BuildImageOptionsBuilder::new()
             .dockerfile(dockerfile_path)
             .t(image_name)
@@ -35,7 +37,7 @@ impl ContainerManager {
                 .build_image(build_image_options, None, Some(body_full(bytes.into())));
         while let Some(info) = image.next().await {
             if let Err(e) = info {
-                bail!("Build failed: {}", e)
+                bail!("Build failed: {e}")
             }
         }
         Ok(())
@@ -49,7 +51,12 @@ impl ContainerManager {
     }
 
     async fn create_build_context(&self, path: &str) -> Result<String> {
-        let tar_path = format!("/tmp/build-context-{}.tar", uuid::Uuid::new_v4());
+        let temp_dir = if cfg!(target_os = "windows") {
+            PathBuf::from(std::env::var("TEMP").unwrap_or_else(|_| "C:\\Windows\\Temp".to_string()))
+        } else {
+            PathBuf::from("/tmp")
+        };
+        let tar_path = temp_dir.join(format!("build-context-{}", uuid::Uuid::new_v4()));
         let output = tokio::process::Command::new("tar")
             .arg("-cf")
             .arg(&tar_path)
@@ -58,13 +65,13 @@ impl ContainerManager {
             .arg(".")
             .output()
             .await
-            .map_err(|e| anyhow!("Failed to create tar for build context: {}", e))?;
+            .map_err(|e| anyhow!("Failed to create tar for build context: {e}"))?;
         if !output.status.success() {
             bail!(
                 "Tar command failed: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
         }
-        Ok(tar_path)
+        Ok(tar_path.to_string_lossy().to_string())
     }
 }
