@@ -1,4 +1,4 @@
-use std::{fmt::format, fs, str::FromStr, sync::Arc};
+use std::{fs, sync::Arc};
 
 use anyhow::{Ok, Result, anyhow, bail};
 use axum::{
@@ -7,20 +7,16 @@ use axum::{
     response::Json,
     routing::post,
 };
-use bollard::{
-    Docker, body_full,
-    query_parameters::{BuildImageOptionsBuilder, CreateImageOptionsBuilder},
-};
-use futures_util::StreamExt;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::io::AsyncReadExt;
 
 mod container_manager;
 mod errors;
+mod function_manager;
 mod models;
 
-use crate::errors::serialize_err;
+use crate::{
+    container_manager::ContainerManager, errors::serialize_err, function_manager::FunctionManager,
+};
 
 struct Config {
     // Contains paths to directories in functions dir
@@ -41,112 +37,6 @@ fn read_function_paths() -> Vec<String> {
         .collect::<Vec<String>>()
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Deserialize)]
-struct FunctionConfig {
-    name: String,
-    #[serde(rename(serialize = "innerPort", deserialize = "innerPort"))]
-    inner_port: u16,
-    memory: u32,
-    timeout: u32,
-    version: String,
-    dockerfile: String,
-    #[serde(skip_deserializing, skip_serializing)]
-    pub build_context_path: std::path::PathBuf,
-}
-impl FunctionConfig {
-    pub async fn from_file<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
-        let content = tokio::fs::read_to_string(&path).await?;
-        let mut config: FunctionConfig = serde_json::from_str(&content)?;
-        config.build_context_path = path.as_ref().parent().unwrap().to_path_buf();
-        Ok(config)
-    }
-}
-struct ContainerManager {
-    docker: Docker,
-}
-impl ContainerManager {
-    pub fn new() -> Result<Self> {
-        let docker = Docker::connect_with_local_defaults()?;
-        Ok(Self { docker })
-    }
-    pub async fn build_image(
-        &self,
-        context_path: &str,
-        image_name: &str,
-        dockerfile_path: &str,
-    ) -> Result<()> {
-        let tar_path = self
-            .create_build_context(context_path)
-            .await
-            .map_err(|e| anyhow!("Failed to create_build_context: {}", e))?;
-        let build_image_options = BuildImageOptionsBuilder::new()
-            .dockerfile(dockerfile_path)
-            .t(image_name)
-            .rm(true)
-            .build();
-        let bytes = Self::tar_to_bytes(&tar_path).await?;
-        let mut image =
-            self.docker
-                .build_image(build_image_options, None, Some(body_full(bytes.into())));
-        while let Some(info) = image.next().await {
-            if let Err(e) = info {
-                bail!("Build failed: {}", e)
-            }
-        }
-        Ok(())
-    }
-    async fn tar_to_bytes(tar_path: &str) -> Result<Vec<u8>> {
-        let mut file = tokio::fs::File::open(tar_path).await?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).await?;
-        Ok(bytes)
-    }
-    async fn create_build_context(&self, path: &str) -> Result<String> {
-        let tar_path = format!("/tmp/build-context-{}.tar", uuid::Uuid::new_v4());
-        let output = tokio::process::Command::new("tar")
-            .arg("-cf")
-            .arg(&tar_path)
-            .arg("-C")
-            .arg(path)
-            .arg(".")
-            .output()
-            .await
-            .map_err(|e| anyhow!("Failed to create tar for build context: {}", e))?;
-        if !output.status.success() {
-            bail!(
-                "Tar command failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        Ok(tar_path)
-    }
-}
-struct FunctionManager {
-    container_manager: ContainerManager,
-}
-impl FunctionManager {
-    pub fn new() -> Result<Self> {
-        let container_manager = ContainerManager::new()?;
-        Ok(Self { container_manager })
-    }
-    pub async fn read_function_config(path: &str) -> Result<FunctionConfig> {
-        let path = format!("functions/{}/function.json", path);
-        Ok(FunctionConfig::from_file(path).await?)
-    }
-    pub async fn build_function_image(&self, config: &FunctionConfig) -> Result<String> {
-        let image_name = format!("{}:{}", config.name, config.version);
-        self.container_manager
-            .build_image(
-                &config.build_context_path.to_string_lossy(),
-                &image_name,
-                &config.dockerfile,
-            )
-            .await?;
-        Ok(image_name)
-    }
-}
-
 struct AppState {
     function_manager: FunctionManager,
 }
@@ -156,6 +46,7 @@ impl AppState {
         Ok(Self { function_manager })
     }
 }
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let paths = read_function_paths();
