@@ -61,8 +61,9 @@ Function → Platform: HTTP Response
 Status: 200 OK
 Body: response in JSON
 
-Prereq:
+Pre-requisites:
 - tar
+- docker
 
 Links 
 https://github.com/fnproject/fn - open source, Functions-as-a-Service (FaaS) compute platform.
