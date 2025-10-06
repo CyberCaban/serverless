@@ -2,6 +2,8 @@ use axum::Json;
 use serde::Serialize;
 use serde_json::Value;
 
+pub mod function_error;
+
 pub struct SerializableError(anyhow::Error);
 impl Serialize for SerializableError {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>

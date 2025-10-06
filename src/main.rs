@@ -1,22 +1,24 @@
-use std::{fs, sync::Arc};
-
+use crate::{
+    container_manager::ContainerManager, errors::serialize_err, function_manager::FunctionManager,
+    shutdown::shutdown_signal,
+};
 use anyhow::{Ok, Result};
 use axum::{
     Router,
     extract::{Path, State},
     response::Json,
-    routing::post,
+    routing::{get, post},
 };
+use serde::Serialize;
 use serde_json::Value;
+use std::{collections::HashMap, fs, sync::Arc};
 
 mod container_manager;
+mod deployed_functions;
 mod errors;
 mod function_manager;
 mod models;
-
-use crate::{
-    container_manager::ContainerManager, errors::serialize_err, function_manager::FunctionManager,
-};
+mod shutdown;
 
 struct Config {
     // Contains paths to directories in functions dir
@@ -37,6 +39,7 @@ fn read_function_paths() -> Vec<String> {
         .collect::<Vec<String>>()
 }
 
+#[derive(Debug)]
 struct AppState {
     function_manager: FunctionManager,
 }
@@ -57,14 +60,18 @@ async fn main() -> Result<()> {
         let state = AppState::new()?;
         Arc::new(state)
     };
+    let cleanup_state = Arc::clone(&state);
     let port = 5000;
     let app = Router::new()
         .route("/deploy/{function_name}", post(deploy_function))
         .route("/invoke/{function_name}", post(invoke_function))
+        .route("/functions", get(list_functions))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
     println!("Running on port {port}");
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal(cleanup_state))
+        .await?;
     Ok(())
 }
 
@@ -77,10 +84,11 @@ async fn deploy_function(
         .await
         .map_err(serialize_err)?;
     dbg!(&conf);
+    // TODO add a way to not block execution and tell the errors if there any
     // tokio::task::spawn(async move { state.function_manager.build_function_image(&conf).await });
     state
         .function_manager
-        .build_function_image(&conf)
+        .deploy_function(conf)
         .await
         .map_err(serialize_err)?;
     std::result::Result::Ok(Json(serde_json::json!({
@@ -88,8 +96,25 @@ async fn deploy_function(
     })))
 }
 
-async fn invoke_function(function_name: String) -> Json<Value> {
-    Json(serde_json::json!({
+async fn list_functions(State(state): State<Arc<AppState>>) -> EndpointResult {
+    let guard_map = {
+        let guard = state.function_manager.deployed_functions.read().await;
+        serde_json::to_value(&*guard).map_err(|_| Json(serde_json::json!("failed to serialize")))?
+    };
+    let m = HashMap::from([("functions", guard_map)]);
+    std::result::Result::Ok(Json(serde_json::json!(m)))
+}
+
+async fn invoke_function(
+    Path(function_name): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> EndpointResult {
+    state
+        .function_manager
+        .try_invoke(&function_name)
+        .await
+        .map_err(serialize_err)?;
+    std::result::Result::Ok(Json(serde_json::json!({
         "status": format!("Invoking {}...", function_name)
-    }))
+    })))
 }

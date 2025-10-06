@@ -1,12 +1,27 @@
 #![allow(dead_code)]
 
-use std::path::PathBuf;
+use std::result::Result::Ok;
+use std::{collections::HashMap, fmt::format, path::PathBuf};
 
-use anyhow::{Ok, Result, anyhow, bail};
-use bollard::{Docker, body_full, query_parameters::BuildImageOptionsBuilder};
-
+use anyhow::{Result, anyhow, bail};
+use bollard::{
+    Docker, body_full,
+    exec::{StartExecOptions, StartExecResults},
+    query_parameters::{
+        self, BuildImageOptionsBuilder, CreateContainerOptionsBuilder,
+        RemoveContainerOptionsBuilder,
+    },
+    secret::{ContainerCreateBody, ExecConfig, HostConfig, PortBinding},
+};
 use futures_util::StreamExt;
 use tokio::io::AsyncReadExt;
+
+use crate::function_manager::FunctionConfig;
+
+const MB_TO_BYTES: i64 = 1024 * 1024;
+
+type ContainerId = String;
+#[derive(Debug)]
 pub struct ContainerManager {
     docker: Docker,
 }
@@ -14,6 +29,121 @@ impl ContainerManager {
     pub fn new() -> Result<Self> {
         let docker = Docker::connect_with_local_defaults()?;
         Ok(Self { docker })
+    }
+
+    pub async fn try_exec(&self, container_id: &str) -> Result<()> {
+        let wget_command = vec![
+            "wget",
+            "--post-data",
+            r#"{ "name": "test" }"#,
+            "--header",
+            "Content-Type: application/json",
+            "-O",
+            "-",
+            "http://localhost:3000/",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let config = ExecConfig {
+            attach_stdout: Some(true),
+            attach_stderr: Some(true),
+            cmd: Some(wget_command),
+            ..Default::default()
+        };
+
+        let exec = self.docker.create_exec(container_id, config).await?;
+        let output = self
+            .docker
+            .start_exec(&exec.id, None::<StartExecOptions>)
+            .await?;
+
+        if let bollard::exec::StartExecResults::Attached { mut output, .. } = output {
+            while let Some(log_output) = output.next().await {
+                match log_output {
+                    Ok(msg) => {
+                        print!("{}", String::from_utf8_lossy(&msg.into_bytes()));
+                    }
+                    Err(e) => {
+                        eprint!("Error: {}", e.to_string())
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn remove_container(&self, container_id: &str) {
+        let options = RemoveContainerOptionsBuilder::new().force(true).build();
+        let _ = self
+            .docker
+            .remove_container(container_id, Some(options))
+            .await;
+    }
+
+    pub async fn is_created(&self, container_id: &str) -> bool {
+        self.docker
+            .inspect_container(
+                container_id,
+                None::<query_parameters::InspectContainerOptions>,
+            )
+            .await
+            .unwrap()
+            .created
+            .is_some()
+    }
+
+    pub async fn start_container(&self, container_id: &str) -> Result<()> {
+        self.docker
+            .start_container(
+                container_id,
+                None::<bollard::query_parameters::StartContainerOptions>,
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub fn container_name_from_image_name(image_name: &str) -> String {
+        format!(
+            "function-{}-{}",
+            image_name.replace(':', "-"),
+            uuid::Uuid::new_v4()
+        )
+    }
+
+    pub fn image_name_from_container_id(image_name: &str, container_id: &str) -> String {
+        format!("function-{}-{}", image_name.replace(":", "-"), container_id)
+    }
+
+    pub async fn create_container(
+        &self,
+        function_config: &FunctionConfig,
+        image_name: &str,
+        port: u16,
+    ) -> Result<ContainerId> {
+        let name = ContainerManager::container_name_from_image_name(image_name);
+        let options = CreateContainerOptionsBuilder::new().name(&name).build();
+        let config = ContainerCreateBody {
+            image: Some(String::from(image_name)),
+            host_config: Some(HostConfig {
+                port_bindings: Some({
+                    let mut bindings = HashMap::new();
+                    bindings.insert(
+                        function_config.inner_port.to_string(),
+                        Some(vec![PortBinding {
+                            host_ip: Some("0.0.0.0".to_string()),
+                            host_port: Some(port.to_string()),
+                        }]),
+                    );
+                    bindings
+                }),
+                memory: Some(function_config.memory * MB_TO_BYTES),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let response = self.docker.create_container(Some(options), config).await?;
+        Ok(response.id)
     }
 
     pub async fn build_image(

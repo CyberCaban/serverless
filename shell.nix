@@ -6,6 +6,7 @@ pkgs.mkShell {
   nativeBuildInputs = with pkgs; [
     pkg-config
     openssl
+    jq
   ];
 
   buildInputs = with pkgs; [
