@@ -2,14 +2,13 @@ use crate::{
     container_manager::ContainerManager, errors::serialize_err, function_manager::FunctionManager,
     shutdown::shutdown_signal,
 };
-use anyhow::{Ok, Result};
+use anyhow::Result;
 use axum::{
     Router,
     extract::{Path, State},
     response::Json,
     routing::{get, post},
 };
-use serde::Serialize;
 use serde_json::Value;
 use std::{collections::HashMap, fs, sync::Arc};
 
@@ -75,7 +74,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-type EndpointResult = std::result::Result<Json<Value>, Json<Value>>;
+type EndpointResult<T = Value> = std::result::Result<Json<T>, Json<T>>;
 async fn deploy_function(
     Path(function_name): Path<String>,
     State(state): State<Arc<AppState>>,
@@ -91,7 +90,7 @@ async fn deploy_function(
         .deploy_function(conf)
         .await
         .map_err(serialize_err)?;
-    std::result::Result::Ok(Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "status": format!("Deploying {}...", function_name)
     })))
 }
@@ -102,7 +101,7 @@ async fn list_functions(State(state): State<Arc<AppState>>) -> EndpointResult {
         serde_json::to_value(&*guard).map_err(|_| Json(serde_json::json!("failed to serialize")))?
     };
     let m = HashMap::from([("functions", guard_map)]);
-    std::result::Result::Ok(Json(serde_json::json!(m)))
+    Ok(Json(serde_json::json!(m)))
 }
 
 async fn invoke_function(
@@ -114,7 +113,7 @@ async fn invoke_function(
         .try_invoke(&function_name)
         .await
         .map_err(serialize_err)?;
-    std::result::Result::Ok(Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "status": format!("Invoking {}...", function_name)
     })))
 }
