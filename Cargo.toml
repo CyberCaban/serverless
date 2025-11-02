@@ -14,3 +14,4 @@ uuid = { version = "1.18.1", features = ["v4"] }
 anyhow = "1.0.100"
 futures-util = "0.3.31"
 thiserror = "2.0.17"
+sqlx = { version = "0.8.6", features = ["runtime-tokio", "sqlite"] }
