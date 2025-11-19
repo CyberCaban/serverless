@@ -1,23 +1,26 @@
 use crate::{
     container_manager::ContainerManager, errors::serialize_err, function_manager::FunctionManager,
-    shutdown::shutdown_signal,
+    redis_manager::RedisManager, shutdown::shutdown_signal,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{
     Router,
     extract::{Path, State},
     response::Json,
     routing::{get, post},
 };
-use serde_json::Value;
-use sqlx::SqlitePool;
-use std::{collections::HashMap, env, fs, sync::Arc};
+use redis::Commands;
+use serde_json::{Value, json};
+use std::{collections::HashMap, fs, sync::Arc};
+
+extern crate redis;
 
 mod container_manager;
 mod deployed_functions;
 mod errors;
 mod function_manager;
 mod models;
+mod redis_manager;
 mod shutdown;
 mod sqlite;
 
@@ -43,15 +46,15 @@ fn read_function_paths() -> Vec<String> {
 #[derive(Debug)]
 struct AppState {
     function_manager: FunctionManager,
-    pool: sqlx::sqlite::SqlitePool,
+    redis_manager: RedisManager,
 }
 impl AppState {
     pub async fn new() -> Result<Self> {
         let function_manager = FunctionManager::new()?;
-        let pool = SqlitePool::connect(&env::var("DATABASE_URL")?).await?;
+        let redis_manager = RedisManager::new().context("Redis error")?;
         Ok(Self {
             function_manager,
-            pool,
+            redis_manager,
         })
     }
 }
@@ -70,6 +73,7 @@ async fn main() -> Result<()> {
     let port = 5000;
     let app = Router::new()
         .route("/deploy/{function_name}", post(deploy_function))
+        .route("/deploy/status/{deployment_id}", get(get_deployment_status))
         .route("/invoke/{function_name}", post(invoke_function))
         .route("/functions", get(list_functions))
         .with_state(state);
@@ -92,11 +96,38 @@ async fn deploy_function(
     dbg!(&conf);
     // TODO add a way to not block execution and tell the errors if there any
     // tokio::task::spawn(async move { state.function_manager.build_function_image(&conf).await });
+    let deployment_id = uuid::Uuid::now_v7().simple();
+    state
+        .redis_manager
+        .set_deployment_state(
+            &deployment_id.to_string(),
+            redis_manager::DeploymentState::Running,
+        )
+        .map_err(serialize_err)?;
+
     tokio::task::spawn(async move {
-        let res = state.function_manager.deploy_function(conf).await;
+        let result = state.function_manager.deploy_function(conf).await;
+        match result {
+            Ok(_) => {
+                let _ = state.redis_manager.set_deployment_state(
+                    &deployment_id.to_string(),
+                    redis_manager::DeploymentState::Finished,
+                );
+            }
+            Err(e) => {
+                let _ = state.redis_manager.set_deployment_state(
+                    &deployment_id.to_string(),
+                    redis_manager::DeploymentState::Failed,
+                );
+                let _ = state
+                    .redis_manager
+                    .set_deployment_error(&deployment_id.to_string(), &e.to_string());
+            }
+        }
     });
+
     Ok(Json(serde_json::json!({
-        "status": format!("Deploying {}...", function_name)
+        "id": deployment_id
     })))
 }
 
@@ -107,6 +138,19 @@ async fn list_functions(State(state): State<Arc<AppState>>) -> EndpointResult {
     };
     let m = HashMap::from([("functions", guard_map)]);
     Ok(Json(serde_json::json!(m)))
+}
+
+async fn get_deployment_status(
+    Path(deployment_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> EndpointResult {
+    let deployment_state = state
+        .redis_manager
+        .get_deployment_state(&deployment_id)
+        .map_err(serialize_err)?;
+    Ok(Json(json!({
+        "state": deployment_state
+    })))
 }
 
 async fn invoke_function(
