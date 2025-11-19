@@ -19,6 +19,12 @@ impl From<anyhow::Error> for SerializableError {
     }
 }
 
+impl From<redis::RedisError> for SerializableError {
+    fn from(value: redis::RedisError) -> Self {
+        SerializableError(anyhow::Error::from(value))
+    }
+}
+
 pub fn serialize_err(e: anyhow::Error) -> Json<Value> {
     let error: SerializableError = e.into();
     Json(serde_json::json!({

@@ -109,7 +109,7 @@ impl ContainerManager {
         format!(
             "function-{}-{}",
             image_name.replace(':', "-"),
-            uuid::Uuid::new_v4()
+            uuid::Uuid::now_v7()
         )
     }
 
@@ -188,7 +188,7 @@ impl ContainerManager {
         } else {
             PathBuf::from("/tmp")
         };
-        let tar_path = temp_dir.join(format!("build-context-{}", uuid::Uuid::new_v4()));
+        let tar_path = temp_dir.join(format!("build-context-{}", uuid::Uuid::now_v7()));
         let output = tokio::process::Command::new("tar")
             .arg("-cf")
             .arg(&tar_path)
