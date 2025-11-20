@@ -1,0 +1,18 @@
+@startuml
+actor User as u
+participant Server as main
+
+group Deploy request
+u -> u : Create serverless function and configure it
+u -> main : send deploy request with function name\n(/deploy/{function_name})
+main -> u : return deployment id
+u -> main : get deployment status by deployment id\n(/deploy/status/{id})
+main -> u : return deployment status
+end
+
+group Invoke request
+u -> main : Invoke request with data that needs to be passed to function\n(/invoke/{function_name})
+main -> main : process request\nand load balancing
+main -> u : function response
+end
+@enduml

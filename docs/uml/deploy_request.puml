@@ -1,0 +1,28 @@
+@startuml
+actor User as u
+participant Server as main
+participant FunctionManager as fm
+participant ContainerManager as cm
+participant redis
+
+group Deploy request
+  u -> main : deploy request
+  activate main
+  main -> redis : Put deployment status 'Running'
+  main -> fm : deploy function async task
+  activate fm
+  main -> u : return deployment id
+deactivate main
+    fm -> cm : build image\ncreate network\ncreate shared volumes if needed
+    activate cm
+    cm -> fm : return status
+    deactivate cm
+    alt deploy successful
+      fm -> redis : put status 'Finished'
+    else deploy failed
+      fm -> redis : put status 'Failed' and error message
+    end
+    deactivate fm
+
+end
+@enduml

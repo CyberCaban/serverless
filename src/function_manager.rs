@@ -55,9 +55,10 @@ impl FunctionManager {
             .get(function_name)
             .ok_or(FunctionError::FunctionNotDeployed)?;
 
+        // TODO: Load balancing
         let container_id = config
             .container_ids
-            .get(0)
+            .first()
             .ok_or(FunctionError::NoRunningContainers)?;
 
         let _ = self.container_manager.try_exec(container_id).await;
