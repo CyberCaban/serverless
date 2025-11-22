@@ -1,11 +1,11 @@
 use anyhow::Result;
+use redis::TypedCommands;
 use std::{
-    fmt::Display,
+    fmt::{Display, format},
     ops::{Deref, DerefMut},
 };
 
-use r2d2::{Pool, PooledConnection};
-use redis::Commands;
+use r2d2::Pool;
 
 #[derive(Debug)]
 pub enum DeploymentState {
@@ -37,6 +37,8 @@ impl DeploymentState {
     }
 }
 
+const ONE_HOUR: i64 = 3600;
+
 #[derive(Debug)]
 pub struct RedisManager(Pool<redis::Client>);
 
@@ -51,24 +53,34 @@ impl RedisManager {
     }
 
     pub fn set_deployment_state(&self, deployment_id: &str, state: DeploymentState) -> Result<()> {
+        let key = format!("deployment:{}:state", deployment_id);
         let mut conn = self.get_connection()?;
-        conn.set::<String, String, ()>(
-            format!("deployment:{}:state", deployment_id),
-            state.to_string(),
-        )
-        .map_err(|e| e.into())
+        conn.set::<String, String>(key.clone(), state.to_string())?;
+        conn.expire::<String>(key, ONE_HOUR)?;
+        Ok(())
     }
 
     pub fn set_deployment_error(&self, deployment_id: &str, error_message: &str) -> Result<()> {
+        let key = format!("deployment:{}:error", deployment_id);
         let mut conn = self.get_connection()?;
-        conn.set(format!("deployment:{}:error", deployment_id), error_message)
-            .map_err(|e| e.into())
+        conn.set(key.clone(), error_message)?;
+        conn.expire(key, ONE_HOUR)?;
+        Ok(())
     }
 
-    pub fn get_deployment_state(&self, deployment_id: &str) -> Result<String> {
+    pub fn append_deploy_logs(&self, deployment_id: &str, log: &str) -> Result<()> {
+        let key = format!("deployment:{}:log", deployment_id);
         let mut conn = self.get_connection()?;
-        conn.get::<String, String>(format!("deployment:{}:state", deployment_id))
-            .map_err(|e| e.into())
+        conn.lpush(key.clone(), log)?;
+        conn.ltrim(key.clone(), 0, 99)?;
+        conn.expire(key, ONE_HOUR)?;
+        Ok(())
+    }
+
+    pub fn get_deployment_state(&self, deployment_id: &str) -> Result<Option<String>> {
+        let key = format!("deployment:{}:state", deployment_id);
+        let mut conn = self.get_connection()?;
+        conn.get::<String>(key).map_err(|e| e.into())
     }
 }
 

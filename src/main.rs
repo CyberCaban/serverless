@@ -9,7 +9,6 @@ use axum::{
     response::Json,
     routing::{get, post},
 };
-use redis::Commands;
 use serde_json::{Value, json};
 use std::{collections::HashMap, fs, sync::Arc};
 
@@ -94,7 +93,6 @@ async fn deploy_function(
         .map_err(serialize_err)?;
     dbg!(&conf);
     // TODO add a way to not block execution and tell the errors if there any
-    // tokio::task::spawn(async move { state.function_manager.build_function_image(&conf).await });
     let deployment_id = uuid::Uuid::now_v7().simple();
     state
         .redis_manager
@@ -120,7 +118,7 @@ async fn deploy_function(
                 );
                 let _ = state
                     .redis_manager
-                    .set_deployment_error(&deployment_id.to_string(), &e.to_string());
+                    .append_deploy_logs(&deployment_id.to_string(), &e.to_string());
             }
         }
     });
