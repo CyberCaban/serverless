@@ -2,6 +2,7 @@ use crate::{
     ContainerManager, deployed_functions::DeployedFunctions, errors::function_error::FunctionError,
 };
 use anyhow::Result;
+use bollard::secret::ContainerCreateBody;
 use serde::{Deserialize, Serialize};
 use std::result::Result::Ok;
 
@@ -31,6 +32,7 @@ impl FunctionConfig {
 #[derive(Debug, Serialize)]
 pub struct RunningFunction {
     pub config: FunctionConfig,
+    pub container_config: ContainerCreateBody,
     pub container_ids: Vec<String>,
 }
 
@@ -93,7 +95,7 @@ impl FunctionManager {
 
     pub async fn read_function_config(path: &str) -> Result<FunctionConfig> {
         let path = format!("functions/{path}/function.json");
-        Ok(FunctionConfig::from_file(path).await?)
+        FunctionConfig::from_file(path).await
     }
 
     pub async fn deploy_function(&self, config: FunctionConfig) -> Result<String> {
@@ -105,25 +107,36 @@ impl FunctionManager {
                 &config.dockerfile,
             )
             .await?;
-        // TODO dynamic port selection
-        let port = 9090;
-        let container_id = self
+        let container_config = self
             .container_manager
-            .create_container(&config, &image_name, port)
+            .create_container_config(&image_name)
             .await?;
-        self.container_manager
-            .start_container(&container_id)
-            .await?;
+        // TODO dynamic port selection
+        let _port = 9090;
         let mut running_containers = self.deployed_functions.write().await;
-        if let Some(running_fn) = running_containers.get_mut(&config.name) {
-            running_fn.container_ids.push(container_id);
-        } else {
-            let function = RunningFunction {
-                config,
-                container_ids: vec![container_id],
-            };
-            running_containers.insert(function.config.name.clone(), function);
-        }
+        let function = RunningFunction {
+            config,
+            container_config,
+            container_ids: vec![],
+        };
+        running_containers.insert(function.config.name.clone(), function);
+        // let container_id = self
+        //     .container_manager
+        //     .create_container(&config, &image_name, port)
+        //     .await?;
+        // self.container_manager
+        //     .start_container(&container_id)
+        //     .await?;
+        // if let Some(running_fn) = running_containers.get_mut(&config.name) {
+        //     running_fn.container_ids.push(container_id);
+        // } else {
+        //     let function = RunningFunction {
+        //         config,
+        //         container_config,
+        //         container_ids: vec![container_id],
+        //     };
+        //     running_containers.insert(function.config.name.clone(), function);
+        // }
         Ok(image_name)
     }
 }

@@ -7,4 +7,3 @@ pub enum FunctionError {
     #[error("No running containers")]
     NoRunningContainers,
 }
-
