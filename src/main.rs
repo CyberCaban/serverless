@@ -1,6 +1,6 @@
 use crate::{
     container_manager::ContainerManager, errors::serialize_err, function_manager::FunctionManager,
-    redis_manager::RedisManager, shutdown::shutdown_signal,
+    logger::setup_logger, redis_manager::RedisManager, shutdown::shutdown_signal,
 };
 use anyhow::{Context, Result};
 use axum::{
@@ -9,6 +9,7 @@ use axum::{
     response::Json,
     routing::{get, post},
 };
+use log::info;
 use serde_json::{Value, json};
 use std::{collections::HashMap, fs, sync::Arc};
 
@@ -18,6 +19,7 @@ mod container_manager;
 mod deployed_functions;
 mod errors;
 mod function_manager;
+mod logger;
 mod models;
 mod redis_manager;
 mod shutdown;
@@ -59,7 +61,10 @@ impl AppState {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    setup_logger()?;
+
     let paths = read_function_paths();
+    info!("Read function paths");
     let config = Config {
         function_paths: paths,
     };
@@ -91,9 +96,12 @@ async fn deploy_function(
     let conf = FunctionManager::read_function_config(&function_name)
         .await
         .map_err(serialize_err)?;
-    dbg!(&conf);
     // TODO add a way to not block execution and tell the errors if there any
     let deployment_id = uuid::Uuid::now_v7().simple();
+    info!(
+        "Deploying function: '{}' with id: '{}'",
+        function_name, &deployment_id
+    );
     state
         .redis_manager
         .set_deployment_state(
