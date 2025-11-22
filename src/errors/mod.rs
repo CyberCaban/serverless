@@ -2,6 +2,7 @@ use axum::Json;
 use serde::Serialize;
 use serde_json::Value;
 
+pub mod deploy_error;
 pub mod function_error;
 
 pub struct SerializableError(anyhow::Error);

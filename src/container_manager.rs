@@ -16,8 +16,10 @@ use bollard::{
     secret::{ContainerCreateBody, ExecConfig, HostConfig, PortBinding},
 };
 use futures_util::StreamExt;
+use log::info;
 use tokio::io::AsyncReadExt;
 
+use crate::errors::deploy_error::DeployError;
 use crate::function_manager::FunctionConfig;
 
 const MB_TO_BYTES: i64 = 1024 * 1024;
@@ -156,12 +158,17 @@ impl ContainerManager {
             .list_networks(None::<ListNetworksOptions>)
             .await?;
         if networks.iter().any(|n| n.name == Some(name.to_string())) {
+            info!(
+                "Docker network '{}' already exists. Skipping creation...",
+                name
+            );
             return Ok(());
         }
         let config = NetworkCreateRequest {
             name: name.to_string(),
             ..Default::default()
         };
+        info!("Creating docker network: '{}'", name);
         self.docker.create_network(config).await?;
         Ok(())
     }
@@ -175,17 +182,19 @@ impl ContainerManager {
         };
         let volumes = self.docker.list_volumes(Some(list_volumes_options)).await?;
         if volumes.volumes.is_some() {
+            info!("Shared volume '{volume_name}' already exists. Skipping creation...");
             return Ok(());
         }
         let config = VolumeCreateOptions {
             name: Some(volume_name.to_string()),
             ..Default::default()
         };
+        info!("Creating volume: '{volume_name}'");
         self.docker.create_volume(config).await?;
         Ok(())
     }
 
-    pub async fn create_container_config(&self, image_name: &str) -> Result<ContainerCreateBody> {
+    pub async fn setup_function_template(&self, image_name: &str) -> Result<ContainerCreateBody> {
         let network_name = image_name;
         self.create_network_if_not_exists(network_name).await?;
         self.create_shared_volume_if_not_exists(image_name).await?;
@@ -200,6 +209,7 @@ impl ContainerManager {
             network_mode: Some(network_name.to_string()),
             ..Default::default()
         };
+        info!("Creating container template for '{image_name}'");
         Ok(ContainerCreateBody {
             image: Some(image_name.to_string()),
             host_config: Some(host_config),
@@ -213,6 +223,7 @@ impl ContainerManager {
         image_name: &str,
         dockerfile_path: &str,
     ) -> Result<()> {
+        info!("Building image '{image_name}'");
         let tar_path = self
             .create_build_context(context_path)
             .await
@@ -226,12 +237,18 @@ impl ContainerManager {
         let mut image =
             self.docker
                 .build_image(build_image_options, None, Some(body_full(bytes.into())));
+        // could change errors vec to just log vec with every log output
+        let mut errors = Vec::with_capacity(20);
         while let Some(info) = image.next().await {
             if let Err(e) = info {
-                bail!("Build failed: {e}")
+                errors.push(e);
             }
         }
-        Ok(())
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(DeployError::DockerGeneral(errors).into())
+        }
     }
 
     async fn tar_to_bytes(tar_path: &str) -> Result<Vec<u8>> {

@@ -3,6 +3,7 @@ use crate::{
 };
 use anyhow::Result;
 use bollard::secret::ContainerCreateBody;
+use log::info;
 use serde::{Deserialize, Serialize};
 use std::result::Result::Ok;
 
@@ -100,6 +101,7 @@ impl FunctionManager {
 
     pub async fn deploy_function(&self, config: FunctionConfig) -> Result<String> {
         let image_name = format!("{}:{}", config.name, config.version);
+        info!("Building image: {}", image_name);
         self.container_manager
             .build_image(
                 &config.build_context_path.to_string_lossy(),
@@ -109,7 +111,7 @@ impl FunctionManager {
             .await?;
         let container_config = self
             .container_manager
-            .create_container_config(&image_name)
+            .setup_function_template(&image_name)
             .await?;
         // TODO dynamic port selection
         let _port = 9090;
