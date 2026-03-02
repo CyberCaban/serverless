@@ -1104,11 +1104,10 @@ dependencies = [
 
 [[package]]
 name = "redis"
-version = "1.0.3"
+version = "0.32.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e969d1d702793536d5fda739a82b88ad7cbe7d04f8386ee8cd16ad3eff4854a5"
+checksum = "014cc767fefab6a3e798ca45112bccad9c6e0e218fbd49720042716c73cfef44"
 dependencies = [
- "arcstr",
  "combine",
  "itoa",
  "num-bigint",
@@ -1119,7 +1118,6 @@ dependencies = [
  "socket2",
  "url",
  "uuid",
- "xxhash-rust",
 ]
 
 [[package]]
