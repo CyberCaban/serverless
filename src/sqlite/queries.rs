@@ -1,0 +1,3 @@
+struct Queries;
+
+impl Queries {}

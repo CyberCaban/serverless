@@ -32,23 +32,25 @@ impl ContainerManager {
     }
 
     pub async fn try_exec(&self, container_id: &str) -> Result<()> {
-        let wget_command = vec![
-            "wget",
-            "--post-data",
-            r#"{ "name": "test" }"#,
-            "--header",
-            "Content-Type: application/json",
-            "-O",
-            "-",
+        let curl_command = [
+            "curl",
+            "-s",
+            "-X",
+            "POST",
             "http://localhost:3000/",
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            r#"{ "name": "test" }"#,
         ]
         .iter()
         .map(|s| s.to_string())
         .collect();
+
         let config = ExecConfig {
             attach_stdout: Some(true),
             attach_stderr: Some(true),
-            cmd: Some(wget_command),
+            cmd: Some(curl_command),
             ..Default::default()
         };
 
@@ -62,10 +64,10 @@ impl ContainerManager {
             while let Some(log_output) = output.next().await {
                 match log_output {
                     Ok(msg) => {
-                        print!("{}", String::from_utf8_lossy(&msg.into_bytes()));
+                        println!("{}", String::from_utf8_lossy(&msg.into_bytes()));
                     }
                     Err(e) => {
-                        eprint!("Error: {}", e.to_string())
+                        eprintln!("Error: {}", e.to_string())
                     }
                 }
             }

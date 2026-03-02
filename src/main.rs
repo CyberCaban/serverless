@@ -2,16 +2,16 @@ use crate::{
     container_manager::ContainerManager, errors::serialize_err, function_manager::FunctionManager,
     shutdown::shutdown_signal,
 };
-use anyhow::{Ok, Result};
+use anyhow::Result;
 use axum::{
     Router,
     extract::{Path, State},
     response::Json,
     routing::{get, post},
 };
-use serde::Serialize;
 use serde_json::Value;
-use std::{collections::HashMap, fs, sync::Arc};
+use sqlx::SqlitePool;
+use std::{collections::HashMap, env, fs, sync::Arc};
 
 mod container_manager;
 mod deployed_functions;
@@ -19,6 +19,7 @@ mod errors;
 mod function_manager;
 mod models;
 mod shutdown;
+mod sqlite;
 
 struct Config {
     // Contains paths to directories in functions dir
@@ -42,11 +43,16 @@ fn read_function_paths() -> Vec<String> {
 #[derive(Debug)]
 struct AppState {
     function_manager: FunctionManager,
+    pool: sqlx::sqlite::SqlitePool,
 }
 impl AppState {
-    pub fn new() -> Result<Self> {
+    pub async fn new() -> Result<Self> {
         let function_manager = FunctionManager::new()?;
-        Ok(Self { function_manager })
+        let pool = SqlitePool::connect(&env::var("DATABASE_URL")?).await?;
+        Ok(Self {
+            function_manager,
+            pool,
+        })
     }
 }
 
@@ -57,7 +63,7 @@ async fn main() -> Result<()> {
         function_paths: paths,
     };
     let state = {
-        let state = AppState::new()?;
+        let state = AppState::new().await?;
         Arc::new(state)
     };
     let cleanup_state = Arc::clone(&state);
@@ -75,7 +81,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-type EndpointResult = std::result::Result<Json<Value>, Json<Value>>;
+type EndpointResult<T = Value> = std::result::Result<Json<T>, Json<T>>;
 async fn deploy_function(
     Path(function_name): Path<String>,
     State(state): State<Arc<AppState>>,
@@ -86,12 +92,10 @@ async fn deploy_function(
     dbg!(&conf);
     // TODO add a way to not block execution and tell the errors if there any
     // tokio::task::spawn(async move { state.function_manager.build_function_image(&conf).await });
-    state
-        .function_manager
-        .deploy_function(conf)
-        .await
-        .map_err(serialize_err)?;
-    std::result::Result::Ok(Json(serde_json::json!({
+    tokio::task::spawn(async move {
+        let res = state.function_manager.deploy_function(conf).await;
+    });
+    Ok(Json(serde_json::json!({
         "status": format!("Deploying {}...", function_name)
     })))
 }
@@ -102,7 +106,7 @@ async fn list_functions(State(state): State<Arc<AppState>>) -> EndpointResult {
         serde_json::to_value(&*guard).map_err(|_| Json(serde_json::json!("failed to serialize")))?
     };
     let m = HashMap::from([("functions", guard_map)]);
-    std::result::Result::Ok(Json(serde_json::json!(m)))
+    Ok(Json(serde_json::json!(m)))
 }
 
 async fn invoke_function(
@@ -114,7 +118,7 @@ async fn invoke_function(
         .try_invoke(&function_name)
         .await
         .map_err(serialize_err)?;
-    std::result::Result::Ok(Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "status": format!("Invoking {}...", function_name)
     })))
 }
