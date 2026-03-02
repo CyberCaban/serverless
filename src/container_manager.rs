@@ -17,6 +17,7 @@ use bollard::{
 };
 use futures_util::StreamExt;
 use log::info;
+use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 
 use crate::errors::deploy_error::DeployError;
@@ -35,7 +36,8 @@ impl ContainerManager {
         Ok(Self { docker })
     }
 
-    pub async fn try_exec(&self, container_id: &str) -> Result<()> {
+    pub async fn try_exec(&self, container_id: &str, payload: &Value) -> Result<Value> {
+        let payload_json = serde_json::to_string(payload)?;
         let curl_command = [
             "curl",
             "-s",
@@ -45,7 +47,7 @@ impl ContainerManager {
             "-H",
             "Content-Type: application/json",
             "-d",
-            r#"{ "name": "test" }"#,
+            &payload_json,
         ]
         .iter()
         .map(|s| s.to_string())
@@ -64,11 +66,12 @@ impl ContainerManager {
             .start_exec(&exec.id, None::<StartExecOptions>)
             .await?;
 
+        let mut full_output: Vec<u8> = Vec::new();
         if let bollard::exec::StartExecResults::Attached { mut output, .. } = output {
             while let Some(log_output) = output.next().await {
                 match log_output {
                     Ok(msg) => {
-                        println!("{}", String::from_utf8_lossy(&msg.into_bytes()));
+                        full_output.extend(msg.into_bytes());
                     }
                     Err(e) => {
                         eprintln!("Error: {}", e)
@@ -76,7 +79,20 @@ impl ContainerManager {
                 }
             }
         }
-        Ok(())
+
+        let raw_output = String::from_utf8_lossy(&full_output).trim().to_string();
+        if raw_output.is_empty() {
+            return Ok(json!({
+                "raw": raw_output
+            }));
+        }
+
+        match serde_json::from_str::<Value>(&raw_output) {
+            Ok(parsed) => Ok(parsed),
+            Err(_) => Ok(json!({
+                "raw": raw_output
+            })),
+        }
     }
 
     pub async fn remove_container(&self, container_id: &str) {
@@ -117,6 +133,10 @@ impl ContainerManager {
         )
     }
 
+    fn resource_name_from_image_name(image_name: &str) -> String {
+        image_name.replace(':', "-")
+    }
+
     pub fn image_name_from_container_id(image_name: &str, container_id: &str) -> String {
         format!("function-{}-{}", image_name.replace(":", "-"), container_id)
     }
@@ -149,6 +169,20 @@ impl ContainerManager {
             ..Default::default()
         };
         let response = self.docker.create_container(Some(options), config).await?;
+        Ok(response.id)
+    }
+
+    pub async fn create_container_from_template(
+        &self,
+        container_config: &ContainerCreateBody,
+        image_name: &str,
+    ) -> Result<ContainerId> {
+        let name = ContainerManager::container_name_from_image_name(image_name);
+        let options = CreateContainerOptionsBuilder::new().name(&name).build();
+        let response = self
+            .docker
+            .create_container(Some(options), container_config.clone())
+            .await?;
         Ok(response.id)
     }
 
@@ -195,18 +229,19 @@ impl ContainerManager {
     }
 
     pub async fn setup_function_template(&self, image_name: &str) -> Result<ContainerCreateBody> {
-        let network_name = image_name;
-        self.create_network_if_not_exists(network_name).await?;
-        self.create_shared_volume_if_not_exists(image_name).await?;
+        let resource_name = Self::resource_name_from_image_name(image_name);
+        self.create_network_if_not_exists(&resource_name).await?;
+        self.create_shared_volume_if_not_exists(&resource_name)
+            .await?;
         let mounts = vec![Mount {
             target: Some("/shared_data".to_string()),
-            source: Some(image_name.to_string()),
+            source: Some(resource_name.clone()),
             typ: Some(bollard::secret::MountTypeEnum::VOLUME),
             ..Default::default()
         }];
         let host_config = HostConfig {
             mounts: Some(mounts),
-            network_mode: Some(network_name.to_string()),
+            network_mode: Some(resource_name),
             ..Default::default()
         };
         info!("Creating container template for '{image_name}'");

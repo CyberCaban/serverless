@@ -1,11 +1,19 @@
 use crate::{
-    ContainerManager, deployed_functions::DeployedFunctions, errors::function_error::FunctionError,
+    container_manager::ContainerManager, deployed_functions::DeployedFunctions,
+    errors::function_error::FunctionError,
+    load_balancer::{LoadBalancingKind, LoadBalancingStrategy, create_balancer},
+    redis_manager::RedisManager,
 };
 use anyhow::Result;
 use bollard::secret::ContainerCreateBody;
 use log::info;
 use serde::{Deserialize, Serialize};
-use std::result::Result::Ok;
+use serde_json::Value;
+use std::sync::Arc;
+
+fn default_replicas() -> u16 {
+    1
+}
 
 #[allow(dead_code)]
 #[derive(Debug, Deserialize, Serialize)]
@@ -17,6 +25,8 @@ pub struct FunctionConfig {
     pub timeout: u32,
     pub version: String,
     pub dockerfile: String,
+    #[serde(default = "default_replicas")]
+    pub replicas: u16,
     #[serde(skip_deserializing, skip_serializing)]
     pub build_context_path: std::path::PathBuf,
 }
@@ -37,38 +47,44 @@ pub struct RunningFunction {
     pub container_ids: Vec<String>,
 }
 
-#[derive(Debug)]
 pub struct FunctionManager {
     container_manager: ContainerManager,
     pub deployed_functions: DeployedFunctions,
+    load_balancer: Arc<dyn LoadBalancingStrategy>,
 }
 
 impl FunctionManager {
     pub fn new() -> Result<Self> {
+        Self::with_load_balancer(create_balancer(LoadBalancingKind::RoundRobin))
+    }
+
+    pub fn with_load_balancer(load_balancer: Arc<dyn LoadBalancingStrategy>) -> Result<Self> {
         let container_manager = ContainerManager::new()?;
         Ok(Self {
             container_manager,
             deployed_functions: DeployedFunctions::new(),
+            load_balancer,
         })
     }
 
-    pub async fn try_invoke(&self, function_name: &str) -> Result<()> {
+    pub async fn try_invoke(&self, function_name: &str, payload: Value) -> Result<Value> {
         let guard = self.deployed_functions.read().await;
         let config = guard
             .get(function_name)
             .ok_or(FunctionError::FunctionNotDeployed)?;
 
-        // TODO: Load balancing
-        let container_id = config
-            .container_ids
-            .first()
-            .ok_or(FunctionError::NoRunningContainers)?;
+        let container_id = self
+            .load_balancer
+            .select_container(function_name, &config.container_ids)?;
 
-        let _ = self.container_manager.try_exec(container_id).await;
-        Ok(())
+        let result = self
+            .container_manager
+            .try_exec(&container_id, &payload)
+            .await?;
+        Ok(result)
     }
 
-    pub async fn cleanup_containers(&self) {
+    pub async fn cleanup_containers(&self, redis_manager: &RedisManager) {
         let function_container_pairs: Vec<(String, Vec<String>)> = {
             let values = self.deployed_functions.read().await;
             values
@@ -78,20 +94,22 @@ impl FunctionManager {
         };
         for (function, config) in function_container_pairs {
             for id in config {
-                self.remove_container(&function, &id).await;
+                self.remove_container(&function, &id, redis_manager).await;
             }
         }
     }
 
-    pub async fn remove_container(&self, function_name: &str, container_id: &str) {
+    pub async fn remove_container(
+        &self,
+        function_name: &str,
+        container_id: &str,
+        redis_manager: &RedisManager,
+    ) {
         self.container_manager.remove_container(container_id).await;
-        self.deployed_functions
-            .write()
-            .await
-            .get_mut(function_name)
-            .unwrap()
-            .container_ids
-            .retain(|id| id != container_id);
+        if let Some(function) = self.deployed_functions.write().await.get_mut(function_name) {
+            function.container_ids.retain(|id| id != container_id);
+        }
+        let _ = redis_manager.remove_function_replica(function_name, container_id);
     }
 
     pub async fn read_function_config(path: &str) -> Result<FunctionConfig> {
@@ -99,7 +117,7 @@ impl FunctionManager {
         FunctionConfig::from_file(path).await
     }
 
-    pub async fn deploy_function(&self, config: FunctionConfig) -> Result<String> {
+    pub async fn deploy_function(&self, config: FunctionConfig, redis_manager: &RedisManager) -> Result<String> {
         let image_name = format!("{}:{}", config.name, config.version);
         info!("Building image: {}", image_name);
         self.container_manager
@@ -113,32 +131,61 @@ impl FunctionManager {
             .container_manager
             .setup_function_template(&image_name)
             .await?;
-        // TODO dynamic port selection
-        let _port = 9090;
+
+        let mut container_ids = Vec::with_capacity(config.replicas as usize);
+        for _ in 0..config.replicas {
+            let container_id = self
+                .container_manager
+                .create_container_from_template(&container_config, &image_name)
+                .await?;
+            self.container_manager.start_container(&container_id).await?;
+            container_ids.push(container_id);
+        }
+
         let mut running_containers = self.deployed_functions.write().await;
         let function = RunningFunction {
             config,
             container_config,
-            container_ids: vec![],
+            container_ids: container_ids.clone(),
         };
+        redis_manager.replace_function_replicas(&function.config.name, &container_ids)?;
         running_containers.insert(function.config.name.clone(), function);
-        // let container_id = self
-        //     .container_manager
-        //     .create_container(&config, &image_name, port)
-        //     .await?;
-        // self.container_manager
-        //     .start_container(&container_id)
-        //     .await?;
-        // if let Some(running_fn) = running_containers.get_mut(&config.name) {
-        //     running_fn.container_ids.push(container_id);
-        // } else {
-        //     let function = RunningFunction {
-        //         config,
-        //         container_config,
-        //         container_ids: vec![container_id],
-        //     };
-        //     running_containers.insert(function.config.name.clone(), function);
-        // }
         Ok(image_name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::redis_manager::RedisManager;
+
+    use super::FunctionManager;
+
+    #[tokio::test]
+    #[ignore = "requires docker daemon, tar and local redis"]
+    async fn deploy_and_invoke_example_main_flow() {
+        let manager = FunctionManager::new().expect("docker should be available for this test");
+        let redis = RedisManager::new().expect("redis should be available for this test");
+
+        let config = FunctionManager::read_function_config("example")
+            .await
+            .expect("example function config should be readable");
+
+        manager
+            .deploy_function(config, &redis)
+            .await
+            .expect("deploy should succeed");
+
+        let invoke_result = manager
+            .try_invoke("example", serde_json::json!({"name": "test"}))
+            .await
+            .expect("invoke should succeed");
+        assert_eq!(invoke_result["message"], "Hello, test");
+
+        let replicas = redis
+            .get_function_replicas("example")
+            .expect("replicas should be tracked in redis");
+        assert!(!replicas.is_empty());
+
+        manager.cleanup_containers(&redis).await;
     }
 }

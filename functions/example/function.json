@@ -3,6 +3,7 @@
   "innerPort": 3000,
   "memory": 128,
   "timeout": 30,
+  "replicas": 2,
   "dockerfile": "Dockerfile",
   "entrypoint": "hello-world",
   "version": "1.0.1"

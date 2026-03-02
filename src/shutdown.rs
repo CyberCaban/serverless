@@ -43,5 +43,8 @@ async fn wait_for_shutdown_signal() {
 pub async fn shutdown_signal(state: Arc<AppState>) {
     wait_for_shutdown_signal().await;
     println!("\nServer closing...");
-    state.function_manager.cleanup_containers().await;
+    state
+        .function_manager
+        .cleanup_containers(&state.redis_manager)
+        .await;
 }

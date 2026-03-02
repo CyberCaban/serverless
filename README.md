@@ -30,8 +30,11 @@ Example workflow:
 ```json
 {
   "name": "your-fn",
+  "innerPort": 3000,
   "memory": 128,
   "timeout": 30,
+  "replicas": 1,
+  "version": "1.0.0",
   "dockerfile": "./path-to-dockerfile",
   "entrypoint": "hello-world"
 }

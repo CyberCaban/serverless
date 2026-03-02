@@ -1,4 +1,0 @@
-DROP TABLE IF EXISTS functions;
-DROP TABLE IF EXISTS builds;
-DROP TABLE IF EXISTS invocations;
-DROP TABLE IF EXISTS execution_logs;
