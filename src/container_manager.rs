@@ -17,6 +17,7 @@ use bollard::{
 };
 use futures_util::StreamExt;
 use log::info;
+use reqwest::Client;
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 
@@ -29,15 +30,59 @@ type ContainerId = String;
 #[derive(Debug)]
 pub struct ContainerManager {
     docker: Docker,
+    http_client: Client,
 }
 impl ContainerManager {
     pub fn new() -> Result<Self> {
         let docker = Docker::connect_with_local_defaults()?;
-        Ok(Self { docker })
+        Ok(Self {
+            docker,
+            http_client: Client::new(),
+        })
     }
 
-    pub async fn try_exec(&self, container_id: &str, payload: &Value) -> Result<Value> {
+    pub async fn try_invoke_http(
+        &self,
+        container_id: &str,
+        inner_port: u16,
+        payload: &Value,
+    ) -> Result<Value> {
+        let inspect = self
+            .docker
+            .inspect_container(
+                container_id,
+                None::<query_parameters::InspectContainerOptions>,
+            )
+            .await?;
+
+        let ip = inspect
+            .network_settings
+            .and_then(|settings| settings.networks)
+            .and_then(|networks| {
+                networks
+                    .into_values()
+                    .find_map(|network| network.ip_address.filter(|value| !value.is_empty()))
+            })
+            .ok_or_else(|| anyhow!("Container '{container_id}' has no routable IP"))?;
+
+        let url = format!("http://{ip}:{inner_port}/");
+        match self.http_client.post(url).json(payload).send().await {
+            Ok(response) => {
+                let response = response.error_for_status()?;
+                let body = response.text().await?;
+                Self::parse_invoke_body(&body)
+            }
+            Err(_) => self.try_invoke_with_exec(container_id, payload).await,
+        }
+    }
+
+    async fn try_invoke_with_exec(
+        &self,
+        container_id: &str,
+        payload: &Value,
+    ) -> Result<Value> {
         let payload_json = serde_json::to_string(payload)?;
+
         let curl_command = [
             "curl",
             "-s",
@@ -50,7 +95,7 @@ impl ContainerManager {
             &payload_json,
         ]
         .iter()
-        .map(|s| s.to_string())
+        .map(|value| value.to_string())
         .collect();
 
         let config = ExecConfig {
@@ -61,6 +106,7 @@ impl ContainerManager {
         };
 
         let exec = self.docker.create_exec(container_id, config).await?;
+
         let output = self
             .docker
             .start_exec(&exec.id, None::<StartExecOptions>)
@@ -69,29 +115,24 @@ impl ContainerManager {
         let mut full_output: Vec<u8> = Vec::new();
         if let bollard::exec::StartExecResults::Attached { mut output, .. } = output {
             while let Some(log_output) = output.next().await {
-                match log_output {
-                    Ok(msg) => {
-                        full_output.extend(msg.into_bytes());
-                    }
-                    Err(e) => {
-                        eprintln!("Error: {}", e)
-                    }
+                if let Ok(msg) = log_output {
+                    full_output.extend(msg.into_bytes());
                 }
             }
         }
 
         let raw_output = String::from_utf8_lossy(&full_output).trim().to_string();
-        if raw_output.is_empty() {
-            return Ok(json!({
-                "raw": raw_output
-            }));
+        Self::parse_invoke_body(&raw_output)
+    }
+
+    fn parse_invoke_body(raw: &str) -> Result<Value> {
+        if raw.trim().is_empty() {
+            return Ok(json!({ "raw": raw }));
         }
 
-        match serde_json::from_str::<Value>(&raw_output) {
+        match serde_json::from_str::<Value>(raw) {
             Ok(parsed) => Ok(parsed),
-            Err(_) => Ok(json!({
-                "raw": raw_output
-            })),
+            Err(_) => Ok(json!({ "raw": raw })),
         }
     }
 

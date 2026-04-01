@@ -79,7 +79,7 @@ impl FunctionManager {
 
         let result = self
             .container_manager
-            .try_exec(&container_id, &payload)
+            .try_invoke_http(&container_id, config.config.inner_port, &payload)
             .await?;
         Ok(result)
     }
@@ -165,8 +165,9 @@ mod tests {
     async fn deploy_and_invoke_example_main_flow() {
         let manager = FunctionManager::new().expect("docker should be available for this test");
         let redis = RedisManager::new().expect("redis should be available for this test");
+        let function_name = "example-js";
 
-        let config = FunctionManager::read_function_config("example")
+        let config = FunctionManager::read_function_config(function_name)
             .await
             .expect("example function config should be readable");
 
@@ -176,13 +177,13 @@ mod tests {
             .expect("deploy should succeed");
 
         let invoke_result = manager
-            .try_invoke("example", serde_json::json!({"name": "test"}))
+            .try_invoke(function_name, serde_json::json!({"name": "test"}))
             .await
             .expect("invoke should succeed");
         assert_eq!(invoke_result["message"], "Hello, test");
 
         let replicas = redis
-            .get_function_replicas("example")
+            .get_function_replicas(function_name)
             .expect("replicas should be tracked in redis");
         assert!(!replicas.is_empty());
 
