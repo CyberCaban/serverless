@@ -7,4 +7,4 @@ pub mod invoke;
 pub mod list_functions;
 pub mod replicas;
 
-pub type EndpointResult = std::result::Result<Json<Value>, Json<Value>>;
+pub type EndpointResult = std::result::Result<Json<Value>, crate::errors::ApiErrorResponse>;

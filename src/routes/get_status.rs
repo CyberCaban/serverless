@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use axum::{Json, extract::{Path, State}};
+use anyhow::anyhow;
 
 use crate::{AppState, errors::serialize_err};
 
@@ -14,6 +15,12 @@ pub async fn get_deployment_status(
         .redis_manager
         .get_deployment_state(&deployment_id)
         .map_err(serialize_err)?;
+    let deployment_state = deployment_state.ok_or_else(|| {
+        serialize_err(anyhow!(
+            "Деплой с id '{deployment_id}' не найден или срок хранения истек"
+        ))
+    })?;
+
     Ok(Json(serde_json::json!({
         "state": deployment_state
     })))

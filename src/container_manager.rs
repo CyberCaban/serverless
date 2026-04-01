@@ -17,7 +17,6 @@ use bollard::{
 };
 use futures_util::StreamExt;
 use log::info;
-use reqwest::Client;
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 
@@ -30,15 +29,11 @@ type ContainerId = String;
 #[derive(Debug)]
 pub struct ContainerManager {
     docker: Docker,
-    http_client: Client,
 }
 impl ContainerManager {
     pub fn new() -> Result<Self> {
         let docker = Docker::connect_with_local_defaults()?;
-        Ok(Self {
-            docker,
-            http_client: Client::new(),
-        })
+        Ok(Self { docker })
     }
 
     pub async fn try_invoke_http(
@@ -47,48 +42,24 @@ impl ContainerManager {
         inner_port: u16,
         payload: &Value,
     ) -> Result<Value> {
-        let inspect = self
-            .docker
-            .inspect_container(
-                container_id,
-                None::<query_parameters::InspectContainerOptions>,
-            )
-            .await?;
-
-        let ip = inspect
-            .network_settings
-            .and_then(|settings| settings.networks)
-            .and_then(|networks| {
-                networks
-                    .into_values()
-                    .find_map(|network| network.ip_address.filter(|value| !value.is_empty()))
-            })
-            .ok_or_else(|| anyhow!("Container '{container_id}' has no routable IP"))?;
-
-        let url = format!("http://{ip}:{inner_port}/");
-        match self.http_client.post(url).json(payload).send().await {
-            Ok(response) => {
-                let response = response.error_for_status()?;
-                let body = response.text().await?;
-                Self::parse_invoke_body(&body)
-            }
-            Err(_) => self.try_invoke_with_exec(container_id, payload).await,
-        }
+        self.try_invoke_with_exec(container_id, inner_port, payload).await
     }
 
     async fn try_invoke_with_exec(
         &self,
         container_id: &str,
+        inner_port: u16,
         payload: &Value,
     ) -> Result<Value> {
         let payload_json = serde_json::to_string(payload)?;
+        let url = format!("http://localhost:{inner_port}/");
 
         let curl_command = [
             "curl",
             "-s",
             "-X",
             "POST",
-            "http://localhost:3000/",
+            &url,
             "-H",
             "Content-Type: application/json",
             "-d",

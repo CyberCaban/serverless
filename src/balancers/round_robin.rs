@@ -1,22 +1,9 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashMap, sync::{Arc, Mutex}};
 
 use crate::errors::function_error::FunctionError;
+use serde_json::Value;
 
-pub trait LoadBalancingStrategy: Send + Sync {
-    fn select_container(
-        &self,
-        function_name: &str,
-        container_ids: &[String],
-    ) -> Result<String, FunctionError>;
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum LoadBalancingKind {
-    RoundRobin,
-}
+use super::LoadBalancingStrategy;
 
 #[derive(Debug, Default)]
 pub struct RoundRobinBalancer {
@@ -34,6 +21,7 @@ impl LoadBalancingStrategy for RoundRobinBalancer {
         &self,
         function_name: &str,
         container_ids: &[String],
+        _payload: Option<&Value>,
     ) -> Result<String, FunctionError> {
         if container_ids.is_empty() {
             return Err(FunctionError::NoRunningContainers);
@@ -51,25 +39,20 @@ impl LoadBalancingStrategy for RoundRobinBalancer {
     }
 }
 
-pub fn create_balancer(kind: LoadBalancingKind) -> Arc<dyn LoadBalancingStrategy> {
-    match kind {
-        LoadBalancingKind::RoundRobin => Arc::new(RoundRobinBalancer::new()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{LoadBalancingStrategy, RoundRobinBalancer};
+    use super::RoundRobinBalancer;
+    use crate::balancers::LoadBalancingStrategy;
 
     #[test]
     fn round_robin_cycles_through_containers() {
         let balancer = RoundRobinBalancer::new();
         let replicas = vec!["a".to_string(), "b".to_string(), "c".to_string()];
 
-        let first = balancer.select_container("example", &replicas).unwrap();
-        let second = balancer.select_container("example", &replicas).unwrap();
-        let third = balancer.select_container("example", &replicas).unwrap();
-        let fourth = balancer.select_container("example", &replicas).unwrap();
+        let first = balancer.select_container("example", &replicas, None).unwrap();
+        let second = balancer.select_container("example", &replicas, None).unwrap();
+        let third = balancer.select_container("example", &replicas, None).unwrap();
+        let fourth = balancer.select_container("example", &replicas, None).unwrap();
 
         assert_eq!(first, "a");
         assert_eq!(second, "b");
@@ -82,10 +65,10 @@ mod tests {
         let balancer = RoundRobinBalancer::new();
         let replicas = vec!["a".to_string(), "b".to_string()];
 
-        let a_first = balancer.select_container("fn-a", &replicas).unwrap();
-        let b_first = balancer.select_container("fn-b", &replicas).unwrap();
-        let a_second = balancer.select_container("fn-a", &replicas).unwrap();
-        let b_second = balancer.select_container("fn-b", &replicas).unwrap();
+        let a_first = balancer.select_container("fn-a", &replicas, None).unwrap();
+        let b_first = balancer.select_container("fn-b", &replicas, None).unwrap();
+        let a_second = balancer.select_container("fn-a", &replicas, None).unwrap();
+        let b_second = balancer.select_container("fn-b", &replicas, None).unwrap();
 
         assert_eq!(a_first, "a");
         assert_eq!(b_first, "a");

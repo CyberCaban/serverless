@@ -19,7 +19,7 @@ mod deployed_functions;
 mod errors;
 mod function_manager;
 mod logger;
-mod load_balancer;
+mod balancers;
 mod models;
 mod redis_manager;
 mod routes;

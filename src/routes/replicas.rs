@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use axum::{Json, extract::{Path, State}};
+use anyhow::anyhow;
 
 use crate::{AppState, errors::serialize_err};
 
@@ -10,6 +11,18 @@ pub async fn get_function_replicas(
     Path(function_name): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> EndpointResult {
+    let function_exists = state
+        .function_manager
+        .deployed_functions
+        .read()
+        .await
+        .contains_key(&function_name);
+    if !function_exists {
+        return Err(serialize_err(anyhow!(
+            "Функция '{function_name}' не развернута"
+        )));
+    }
+
     let mut replicas = state
         .redis_manager
         .get_function_replicas(&function_name)

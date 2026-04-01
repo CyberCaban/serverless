@@ -2,8 +2,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum FunctionError {
-    #[error("Function not deployed")]
+    #[error("Функция не развернута")]
     FunctionNotDeployed,
-    #[error("No running containers")]
+    #[error("Нет запущенных контейнеров для функции")]
     NoRunningContainers,
 }
