@@ -22,6 +22,10 @@
    · Кэширование метаданных
 3. Мониторинг и отладка - как отслеживать выполнение распределенных функций?
 
+TODO:
+- Добавить автоскейлинг + scale-to-zero.
+- Восстановление состояния после рестарта процесса (сейчас часть состояния в памяти).
+
 
 Example workflow:
 1. Create directory with your serverless function
@@ -34,6 +38,8 @@ Example workflow:
   "memory": 128,
   "timeout": 30,
   "replicas": 1,
+  "loadBalancer": "round_robin",
+  "replicaWeights": [1],
   "version": "1.0.0",
   "dockerfile": "./path-to-dockerfile",
   "entrypoint": "hello-world"
@@ -48,7 +54,7 @@ Deploying will create docker image
 ```bash
 curl -X POST http://localhost:5000/invoke/your-fn \
   -H "Content-Type: application/json" \
-  -d '{ "name": "yourName" }'
+  -d '{ "name": "yourName", "priority": 5 }'
 ```
 Invoking will run your function with passed parameters and return result in JSON
 

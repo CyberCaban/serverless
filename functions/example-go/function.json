@@ -1,0 +1,12 @@
+{
+  "name": "example-go",
+  "innerPort": 8080,
+  "memory": 128,
+  "timeout": 30,
+  "replicas": 2,
+  "loadBalancer": "weighted_priority",
+  "replicaWeights": [1, 3],
+  "dockerfile": "Dockerfile",
+  "entrypoint": "hello-world",
+  "version": "1.0.1"
+}
