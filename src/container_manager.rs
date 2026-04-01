@@ -16,7 +16,7 @@ use bollard::{
     secret::{ContainerCreateBody, ExecConfig, HostConfig, PortBinding},
 };
 use futures_util::StreamExt;
-use log::info;
+use log::{error, info, warn};
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 
@@ -270,7 +270,9 @@ impl ContainerManager {
         image_name: &str,
         dockerfile_path: &str,
     ) -> Result<()> {
-        info!("Building image '{image_name}'");
+        info!(
+            "Building image '{image_name}' with dockerfile '{dockerfile_path}' from '{context_path}'"
+        );
         let tar_path = self
             .create_build_context(context_path)
             .await
@@ -284,18 +286,54 @@ impl ContainerManager {
         let mut image =
             self.docker
                 .build_image(build_image_options, None, Some(body_full(bytes.into())));
-        // could change errors vec to just log vec with every log output
         let mut errors = Vec::with_capacity(20);
+        let mut daemon_error: Option<String> = None;
         while let Some(info) = image.next().await {
-            if let Err(e) = info {
-                errors.push(e);
+            match info {
+                Ok(build_info) => {
+                    if let Some(stream) = build_info.stream.as_deref() {
+                        let line = stream.trim();
+                        if !line.is_empty() {
+                            info!("[docker build:{image_name}] {line}");
+                        }
+                    }
+                    if let Some(status) = build_info.status.as_deref() {
+                        let progress = build_info.progress.as_deref().unwrap_or("");
+                        let id = build_info.id.as_deref().unwrap_or("");
+                        let suffix = if id.is_empty() {
+                            progress.to_string()
+                        } else if progress.is_empty() {
+                            format!(" {id}")
+                        } else {
+                            format!(" {id} {progress}")
+                        };
+                        let line = format!("{status}{suffix}").trim().to_string();
+                        if !line.is_empty() {
+                            info!("[docker build:{image_name}] {line}");
+                        }
+                    }
+                    if let Some(err_text) = build_info.error.as_deref() {
+                        let line = err_text.trim();
+                        if !line.is_empty() {
+                            error!("[docker build:{image_name}] {line}");
+                            daemon_error = Some(line.to_string());
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("[docker build:{image_name}] stream error: {e}");
+                    errors.push(e);
+                }
             }
         }
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(DeployError::DockerGeneral(errors).into())
+        if !errors.is_empty() {
+            return Err(DeployError::DockerGeneral(errors).into());
         }
+        if let Some(err) = daemon_error {
+            bail!("Docker build failed for '{image_name}': {err}");
+        }
+        warn!("Docker build for '{image_name}' completed");
+        Ok(())
     }
 
     async fn tar_to_bytes(tar_path: &str) -> Result<Vec<u8>> {
