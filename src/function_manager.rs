@@ -1,6 +1,7 @@
 use crate::{
-    container_manager::ContainerManager, deployed_functions::DeployedFunctions,
     balancers::{LoadBalancingKind, LoadBalancingStrategy, create_balancer},
+    container_manager::ContainerManager,
+    deployed_functions::DeployedFunctions,
     errors::function_error::FunctionError,
     redis_manager::RedisManager,
 };
@@ -89,7 +90,8 @@ impl FunctionManager {
                 .ok_or(FunctionError::FunctionNotDeployed)?
         };
 
-        let container_id = load_balancer.select_container(function_name, &container_ids, Some(&payload))?;
+        let container_id =
+            load_balancer.select_container(function_name, &container_ids, Some(&payload))?;
 
         let result = self
             .container_manager
@@ -160,7 +162,11 @@ impl FunctionManager {
             .with_context(|| format!("Не удалось прочитать конфиг функции '{path}'"))
     }
 
-    pub async fn deploy_function(&self, config: FunctionConfig, redis_manager: &RedisManager) -> Result<String> {
+    pub async fn deploy_function(
+        &self,
+        config: FunctionConfig,
+        redis_manager: &RedisManager,
+    ) -> Result<String> {
         let image_name = format!("{}:{}", config.name, config.version);
         info!("Building image: {}", image_name);
         self.container_manager
@@ -181,7 +187,9 @@ impl FunctionManager {
                 .container_manager
                 .create_container_from_template(&container_config, &image_name)
                 .await?;
-            self.container_manager.start_container(&container_id).await?;
+            self.container_manager
+                .start_container(&container_id)
+                .await?;
             container_ids.push(container_id);
         }
 
@@ -246,6 +254,41 @@ mod tests {
             .await
             .expect("invoke should succeed");
         assert_eq!(invoke_result["message"], "Hello, test");
+
+        let replicas = redis
+            .get_function_replicas(function_name)
+            .expect("replicas should be tracked in redis");
+        assert!(!replicas.is_empty());
+
+        manager.cleanup_containers(&redis).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires docker daemon, tar and local redis"]
+    async fn integration_example_go() {
+        let manager = FunctionManager::new().expect("docker should be available for this test");
+        let redis = RedisManager::new().expect("redis should be available for this test");
+        let function_name = "example-go";
+
+        let config = FunctionManager::read_function_config(function_name)
+            .await
+            .expect("example function config should be readable");
+
+        manager
+            .deploy_function(config, &redis)
+            .await
+            .expect("deploy should succeed");
+
+        let array = [9, 4, 6, 32, 5, 7, 82, 3];
+        let mut expected = array.clone();
+        expected.sort();
+        let invoke_result = manager
+            .try_invoke(function_name, serde_json::json!({"numbers": array}))
+            .await
+            .expect("invoke should succeed");
+        let result: Vec<i32> =
+            serde_json::from_value(invoke_result["sorted"].clone()).expect("Must be parsable");
+        assert_eq!(result, expected);
 
         let replicas = redis
             .get_function_replicas(function_name)

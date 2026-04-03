@@ -1,8 +1,8 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use redis::TypedCommands;
 use std::{
-    fmt::Display,
     collections::HashSet,
+    fmt::Display,
     ops::{Deref, DerefMut},
 };
 
@@ -47,7 +47,9 @@ pub struct RedisManager(Pool<redis::Client>);
 impl RedisManager {
     pub fn new() -> Result<Self> {
         let redis_client = redis::Client::open("redis://127.0.0.1/")?;
-        let pool = r2d2::Pool::builder().build(redis_client)?;
+        let pool = r2d2::Pool::builder()
+            .build(redis_client)
+            .context("Failed to open minimum number of connections. Is redis running?")?;
         Ok(Self(pool))
     }
     pub fn get_connection(&self) -> Result<r2d2::PooledConnection<redis::Client>> {
@@ -85,7 +87,11 @@ impl RedisManager {
         conn.get::<String>(key).map_err(|e| e.into())
     }
 
-    pub fn replace_function_replicas(&self, function_name: &str, replicas: &[String]) -> Result<()> {
+    pub fn replace_function_replicas(
+        &self,
+        function_name: &str,
+        replicas: &[String],
+    ) -> Result<()> {
         let key = format!("function:{}:replicas", function_name);
         let mut conn = self.get_connection()?;
         let _: usize = conn.del(&key)?;
