@@ -64,8 +64,44 @@ impl RedisManager {
         Ok(())
     }
 
+    pub fn set_operation_state(&self, operation_id: &str, state: DeploymentState) -> Result<()> {
+        let key = format!("operation:{}:state", operation_id);
+        let mut conn = self.get_connection()?;
+        conn.set::<String, String>(key.clone(), state.to_string())?;
+        conn.expire::<String>(key, ONE_HOUR)?;
+        Ok(())
+    }
+
+    pub fn set_operation_kind(&self, operation_id: &str, kind: &str) -> Result<()> {
+        let key = format!("operation:{}:kind", operation_id);
+        let mut conn = self.get_connection()?;
+        conn.set(key.clone(), kind)?;
+        conn.expire(key, ONE_HOUR)?;
+        Ok(())
+    }
+
+    pub fn set_operation_function_name(
+        &self,
+        operation_id: &str,
+        function_name: &str,
+    ) -> Result<()> {
+        let key = format!("operation:{}:function", operation_id);
+        let mut conn = self.get_connection()?;
+        conn.set(key.clone(), function_name)?;
+        conn.expire(key, ONE_HOUR)?;
+        Ok(())
+    }
+
     pub fn set_deployment_error(&self, deployment_id: &str, error_message: &str) -> Result<()> {
         let key = format!("deployment:{}:error", deployment_id);
+        let mut conn = self.get_connection()?;
+        conn.set(key.clone(), error_message)?;
+        conn.expire(key, ONE_HOUR)?;
+        Ok(())
+    }
+
+    pub fn set_operation_error(&self, operation_id: &str, error_message: &str) -> Result<()> {
+        let key = format!("operation:{}:error", operation_id);
         let mut conn = self.get_connection()?;
         conn.set(key.clone(), error_message)?;
         conn.expire(key, ONE_HOUR)?;
@@ -81,8 +117,35 @@ impl RedisManager {
         Ok(())
     }
 
+    pub fn append_operation_logs(&self, operation_id: &str, log: &str) -> Result<()> {
+        let key = format!("operation:{}:log", operation_id);
+        let mut conn = self.get_connection()?;
+        conn.lpush(key.clone(), log)?;
+        conn.ltrim(key.clone(), 0, 99)?;
+        conn.expire(key, ONE_HOUR)?;
+        Ok(())
+    }
+
     pub fn get_deployment_state(&self, deployment_id: &str) -> Result<Option<String>> {
         let key = format!("deployment:{}:state", deployment_id);
+        let mut conn = self.get_connection()?;
+        conn.get::<String>(key).map_err(|e| e.into())
+    }
+
+    pub fn get_operation_state(&self, operation_id: &str) -> Result<Option<String>> {
+        let key = format!("operation:{}:state", operation_id);
+        let mut conn = self.get_connection()?;
+        conn.get::<String>(key).map_err(|e| e.into())
+    }
+
+    pub fn get_operation_kind(&self, operation_id: &str) -> Result<Option<String>> {
+        let key = format!("operation:{}:kind", operation_id);
+        let mut conn = self.get_connection()?;
+        conn.get::<String>(key).map_err(|e| e.into())
+    }
+
+    pub fn get_operation_function_name(&self, operation_id: &str) -> Result<Option<String>> {
+        let key = format!("operation:{}:function", operation_id);
         let mut conn = self.get_connection()?;
         conn.get::<String>(key).map_err(|e| e.into())
     }
@@ -93,8 +156,21 @@ impl RedisManager {
         conn.get::<String>(key).map_err(|e| e.into())
     }
 
+    pub fn get_operation_error(&self, operation_id: &str) -> Result<Option<String>> {
+        let key = format!("operation:{}:error", operation_id);
+        let mut conn = self.get_connection()?;
+        conn.get::<String>(key).map_err(|e| e.into())
+    }
+
     pub fn get_deployment_logs(&self, deployment_id: &str) -> Result<Vec<String>> {
         let key = format!("deployment:{}:log", deployment_id);
+        let mut conn = self.get_connection()?;
+        let logs: Vec<String> = conn.lrange(key, 0, -1)?;
+        Ok(logs)
+    }
+
+    pub fn get_operation_logs(&self, operation_id: &str) -> Result<Vec<String>> {
+        let key = format!("operation:{}:log", operation_id);
         let mut conn = self.get_connection()?;
         let logs: Vec<String> = conn.lrange(key, 0, -1)?;
         Ok(logs)

@@ -5,11 +5,12 @@ use crate::{
         deploy::deploy_function, get_status::get_deployment_status,
         invoke::invoke_function, list_functions::list_functions,
         replicas::get_function_replicas, stop::stop_function,
+        update_config::update_function_config,
     },
     shutdown::shutdown_signal,
 };
 use anyhow::{Context, Result};
-use axum::{Router, routing::{get, post}};
+use axum::{Router, routing::{get, patch, post}};
 use log::{info, warn};
 use std::{fs, sync::Arc};
 
@@ -129,6 +130,7 @@ async fn main() -> Result<()> {
         .route("/deploy/{function_name}", post(deploy_function))
         .route("/deploy/status/{deployment_id}", get(get_deployment_status))
         .route("/invoke/{function_name}", post(invoke_function))
+        .route("/functions/{function_name}", patch(update_function_config))
         .route("/functions/{function_name}/stop", post(stop_function))
         .route("/functions/{function_name}/replicas", get(get_function_replicas))
         .route("/functions", get(list_functions))

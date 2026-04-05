@@ -21,6 +21,10 @@ fn default_load_balancer() -> String {
     "round_robin".to_string()
 }
 
+fn function_config_path(function_name: &str) -> String {
+    format!("functions/{function_name}/function.json")
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Deserialize, Serialize)]
 pub struct FunctionConfig {
@@ -41,12 +45,56 @@ pub struct FunctionConfig {
     pub build_context_path: std::path::PathBuf,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct FunctionConfigUpdate {
+    #[serde(rename = "innerPort")]
+    pub inner_port: Option<u16>,
+    pub memory: Option<i64>,
+    pub timeout: Option<u32>,
+    pub version: Option<String>,
+    pub dockerfile: Option<String>,
+    pub replicas: Option<u16>,
+    #[serde(rename = "loadBalancer")]
+    pub load_balancer: Option<String>,
+    #[serde(rename = "replicaWeights")]
+    pub replica_weights: Option<Vec<usize>>,
+}
+
 impl FunctionConfig {
     pub async fn from_file<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
         let content = tokio::fs::read_to_string(&path).await?;
         let mut config: FunctionConfig = serde_json::from_str(&content)?;
         config.build_context_path = path.as_ref().parent().unwrap().to_path_buf();
         Ok(config)
+    }
+}
+
+impl FunctionConfigUpdate {
+    pub fn apply_to(self, config: &mut FunctionConfig) {
+        if let Some(value) = self.inner_port {
+            config.inner_port = value;
+        }
+        if let Some(value) = self.memory {
+            config.memory = value;
+        }
+        if let Some(value) = self.timeout {
+            config.timeout = value;
+        }
+        if let Some(value) = self.version {
+            config.version = value;
+        }
+        if let Some(value) = self.dockerfile {
+            config.dockerfile = value;
+        }
+        if let Some(value) = self.replicas {
+            config.replicas = value;
+        }
+        if let Some(value) = self.load_balancer {
+            config.load_balancer = value;
+        }
+        if let Some(value) = self.replica_weights {
+            config.replica_weights = value;
+        }
     }
 }
 
@@ -163,7 +211,7 @@ impl FunctionManager {
 
     pub async fn read_function_config(path: &str) -> Result<FunctionConfig> {
         let function_dir = format!("functions/{path}");
-        let config_path = format!("{function_dir}/function.json");
+        let config_path = function_config_path(path);
 
         if !tokio::fs::try_exists(&function_dir)
             .await
@@ -186,6 +234,32 @@ impl FunctionManager {
         FunctionConfig::from_file(&config_path)
             .await
             .with_context(|| format!("Не удалось прочитать конфиг функции '{path}'"))
+    }
+
+    pub async fn update_function_config(
+        &self,
+        function_name: &str,
+        update: FunctionConfigUpdate,
+        redis_manager: &RedisManager,
+    ) -> Result<FunctionConfig> {
+        let mut config = Self::read_function_config(function_name).await?;
+        update.apply_to(&mut config);
+
+        let config_path = function_config_path(function_name);
+        let serialized = serde_json::to_string_pretty(&config)?;
+        tokio::fs::write(&config_path, serialized).await?;
+
+        let should_redeploy = {
+            let deployed = self.deployed_functions.read().await;
+            deployed.contains_key(function_name)
+        };
+
+        if should_redeploy {
+            self.redeploy_function_by_name(function_name, redis_manager)
+                .await?;
+        }
+
+        Self::read_function_config(function_name).await
     }
 
     pub async fn stop_function(
