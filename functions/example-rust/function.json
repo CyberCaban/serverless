@@ -4,7 +4,7 @@
   "memory": 256,
   "timeout": 30,
   "replicas": 2,
-  "loadBalancer": "weighted_priority",
+  "loadBalancer": "rr",
   "replicaWeights": [2, 1],
   "dockerfile": "Dockerfile",
   "entrypoint": "hello-world",

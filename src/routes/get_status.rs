@@ -21,6 +21,23 @@ pub async fn get_deployment_status(
         ))
     })?;
 
+    if deployment_state == "failed" {
+        let error = state
+            .redis_manager
+            .get_deployment_error(&deployment_id)
+            .map_err(serialize_err)?;
+        let logs = state
+            .redis_manager
+            .get_deployment_logs(&deployment_id)
+            .map_err(serialize_err)?;
+
+        return Ok(Json(serde_json::json!({
+            "state": deployment_state,
+            "error": error,
+            "logs": logs
+        })));
+    }
+
     Ok(Json(serde_json::json!({
         "state": deployment_state
     })))

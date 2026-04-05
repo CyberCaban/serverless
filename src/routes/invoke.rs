@@ -18,12 +18,13 @@ pub async fn invoke_function(
 
     let result = state
         .function_manager
-        .try_invoke(&function_name, payload_value)
+        .try_invoke_with_meta(&function_name, payload_value)
         .await
         .map_err(serialize_err)?;
 
     Ok(Json(serde_json::json!({
         "function": function_name,
-        "result": result
+        "containerId": result.container_id,
+        "result": result.result
     })))
 }

@@ -87,6 +87,19 @@ impl RedisManager {
         conn.get::<String>(key).map_err(|e| e.into())
     }
 
+    pub fn get_deployment_error(&self, deployment_id: &str) -> Result<Option<String>> {
+        let key = format!("deployment:{}:error", deployment_id);
+        let mut conn = self.get_connection()?;
+        conn.get::<String>(key).map_err(|e| e.into())
+    }
+
+    pub fn get_deployment_logs(&self, deployment_id: &str) -> Result<Vec<String>> {
+        let key = format!("deployment:{}:log", deployment_id);
+        let mut conn = self.get_connection()?;
+        let logs: Vec<String> = conn.lrange(key, 0, -1)?;
+        Ok(logs)
+    }
+
     pub fn replace_function_replicas(
         &self,
         function_name: &str,

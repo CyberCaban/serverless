@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::{Json, extract::{Path, State}};
 use log::info;
 
-use crate::{AppState, errors::serialize_err, function_manager::FunctionManager, redis_manager};
+use crate::{AppState, errors::serialize_err, redis_manager};
 
 use super::EndpointResult;
 
@@ -11,9 +11,6 @@ pub async fn deploy_function(
     Path(function_name): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> EndpointResult {
-    let conf = FunctionManager::read_function_config(&function_name)
-        .await
-        .map_err(serialize_err)?;
     let deployment_id = uuid::Uuid::now_v7().simple();
     info!(
         "Deploying function: '{}' with id: '{}'",
@@ -30,7 +27,7 @@ pub async fn deploy_function(
     tokio::task::spawn(async move {
         let result = state
             .function_manager
-            .deploy_function(conf, &state.redis_manager)
+            .redeploy_function_by_name(&function_name, &state.redis_manager)
             .await;
         match result {
             Ok(_) => {

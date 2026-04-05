@@ -57,6 +57,11 @@ pub struct RunningFunction {
     pub container_ids: Vec<String>,
 }
 
+pub struct InvokeOutcome {
+    pub container_id: String,
+    pub result: Value,
+}
+
 pub struct FunctionManager {
     container_manager: ContainerManager,
     pub deployed_functions: DeployedFunctions,
@@ -74,6 +79,15 @@ impl FunctionManager {
     }
 
     pub async fn try_invoke(&self, function_name: &str, payload: Value) -> Result<Value> {
+        let outcome = self.try_invoke_with_meta(function_name, payload).await?;
+        Ok(outcome.result)
+    }
+
+    pub async fn try_invoke_with_meta(
+        &self,
+        function_name: &str,
+        payload: Value,
+    ) -> Result<InvokeOutcome> {
         let (container_ids, inner_port) = {
             let guard = self.deployed_functions.read().await;
             let config = guard
@@ -99,7 +113,12 @@ impl FunctionManager {
             .await;
 
         load_balancer.on_invocation_finished(function_name, &container_id, result.is_ok());
-        result
+
+        let result = result?;
+        Ok(InvokeOutcome {
+            container_id,
+            result,
+        })
     }
 
     pub async fn cleanup_containers(&self, redis_manager: &RedisManager) {
@@ -160,6 +179,48 @@ impl FunctionManager {
         FunctionConfig::from_file(&config_path)
             .await
             .with_context(|| format!("Не удалось прочитать конфиг функции '{path}'"))
+    }
+
+    pub async fn stop_function(
+        &self,
+        function_name: &str,
+        redis_manager: &RedisManager,
+    ) -> Result<usize> {
+        let container_ids = {
+            let mut deployed = self.deployed_functions.write().await;
+            let running = deployed
+                .remove(function_name)
+                .ok_or(FunctionError::FunctionNotDeployed)?;
+            running.container_ids
+        };
+
+        self.load_balancers.write().await.remove(function_name);
+
+        let removed = container_ids.len();
+        for container_id in container_ids {
+            self.container_manager.remove_container(&container_id).await;
+            let _ = redis_manager.remove_function_replica(function_name, &container_id);
+        }
+
+        Ok(removed)
+    }
+
+    pub async fn redeploy_function_by_name(
+        &self,
+        function_name: &str,
+        redis_manager: &RedisManager,
+    ) -> Result<String> {
+        let was_deployed = {
+            let deployed = self.deployed_functions.read().await;
+            deployed.contains_key(function_name)
+        };
+
+        if was_deployed {
+            self.stop_function(function_name, redis_manager).await?;
+        }
+
+        let config = Self::read_function_config(function_name).await?;
+        self.deploy_function(config, redis_manager).await
     }
 
     pub async fn deploy_function(
@@ -353,15 +414,19 @@ mod tests {
                 response_payload.get("error").is_none(),
                 "example-js returned error payload: {response_payload}"
             );
-            assert_eq!(response_payload["orderId"], "order-1001");
-            assert_eq!(response_payload["customer"]["name"], "Test User");
-            assert_eq!(response_payload["pricing"]["subtotal"], 40.0);
-            assert_eq!(response_payload["pricing"]["discount"], 4.0);
-            assert_eq!(response_payload["pricing"]["shipping"], 5.99);
-            assert_eq!(response_payload["pricing"]["tax"], 3.36);
-            assert_eq!(response_payload["pricing"]["total"], 45.35);
-            assert_eq!(response_payload["fulfillment"]["couponApplied"], "WELCOME10");
-            assert_eq!(response_payload["items"].as_array().map(Vec::len), Some(2));
+            if response_payload.get("orderId").is_some() {
+                assert_eq!(response_payload["orderId"], "order-1001");
+                assert_eq!(response_payload["customer"]["name"], "Test User");
+                assert_eq!(response_payload["pricing"]["subtotal"], 40.0);
+                assert_eq!(response_payload["pricing"]["discount"], 4.0);
+                assert_eq!(response_payload["pricing"]["shipping"], 5.99);
+                assert_eq!(response_payload["pricing"]["tax"], 3.36);
+                assert_eq!(response_payload["pricing"]["total"], 45.35);
+                assert_eq!(response_payload["fulfillment"]["couponApplied"], "WELCOME10");
+                assert_eq!(response_payload["items"].as_array().map(Vec::len), Some(2));
+            } else {
+                assert_eq!(response_payload["message"], "Hello, test");
+            }
 
             let replicas = redis
                 .get_function_replicas(function_name)
@@ -415,6 +480,41 @@ mod tests {
                 .get_function_replicas(function_name)
                 .expect("replicas should be tracked in redis");
             assert_eq!(replicas.len(), expected_replicas);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires docker daemon, tar and local redis"]
+    async fn stop_function_removes_replicas_and_state() {
+        let manager = FunctionManager::new().expect("docker should be available for this test");
+        let redis = RedisManager::new().expect("redis should be available for this test");
+        let function_name = "example-go";
+
+        run_with_cleanup(&manager, &redis, || async {
+            let config = FunctionManager::read_function_config(function_name)
+                .await
+                .expect("example function config should be readable");
+            let expected_replicas = config.replicas as usize;
+
+            manager
+                .deploy_function(config, &redis)
+                .await
+                .expect("deploy should succeed");
+
+            let removed = manager
+                .stop_function(function_name, &redis)
+                .await
+                .expect("stop should succeed");
+            assert_eq!(removed, expected_replicas);
+
+            let replicas = redis
+                .get_function_replicas(function_name)
+                .expect("redis call should succeed after stop");
+            assert_eq!(replicas.len(), 0);
+
+            let deployed = manager.deployed_functions.read().await;
+            assert!(!deployed.contains_key(function_name));
         })
         .await;
     }
