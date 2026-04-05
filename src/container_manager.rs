@@ -24,6 +24,14 @@ use crate::errors::deploy_error::DeployError;
 use crate::function_manager::FunctionConfig;
 
 const MB_TO_BYTES: i64 = 1024 * 1024;
+pub const MANAGED_CONTAINER_LABEL: &str = "serverless.managed=true";
+
+fn managed_container_labels() -> HashMap<String, String> {
+    HashMap::from([(
+        "serverless.managed".to_string(),
+        "true".to_string(),
+    )])
+}
 
 type ContainerId = String;
 #[derive(Debug)]
@@ -163,6 +171,7 @@ impl ContainerManager {
         let options = CreateContainerOptionsBuilder::new().name(&name).build();
         let config = ContainerCreateBody {
             image: Some(String::from(image_name)),
+            labels: Some(managed_container_labels()),
             host_config: Some(HostConfig {
                 port_bindings: Some({
                     let mut bindings = HashMap::new();
@@ -240,7 +249,11 @@ impl ContainerManager {
         Ok(())
     }
 
-    pub async fn setup_function_template(&self, image_name: &str) -> Result<ContainerCreateBody> {
+    pub async fn setup_function_template(
+        &self,
+        image_name: &str,
+        function_config: &FunctionConfig,
+    ) -> Result<ContainerCreateBody> {
         let resource_name = Self::resource_name_from_image_name(image_name);
         self.create_network_if_not_exists(&resource_name).await?;
         self.create_shared_volume_if_not_exists(&resource_name)
@@ -254,11 +267,13 @@ impl ContainerManager {
         let host_config = HostConfig {
             mounts: Some(mounts),
             network_mode: Some(resource_name),
+            memory: Some(function_config.memory * MB_TO_BYTES),
             ..Default::default()
         };
         info!("Creating container template for '{image_name}'");
         Ok(ContainerCreateBody {
             image: Some(image_name.to_string()),
+            labels: Some(managed_container_labels()),
             host_config: Some(host_config),
             ..Default::default()
         })
@@ -281,6 +296,7 @@ impl ContainerManager {
             .dockerfile(dockerfile_path)
             .t(image_name)
             .rm(true)
+            .forcerm(true)
             .build();
         let bytes = Self::tar_to_bytes(&tar_path).await?;
         let mut image =

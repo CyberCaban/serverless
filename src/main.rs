@@ -1,4 +1,5 @@
 use crate::{
+    container_manager::MANAGED_CONTAINER_LABEL,
     function_manager::FunctionManager, logger::setup_logger, redis_manager::RedisManager,
     routes::{
         deploy::deploy_function, get_status::get_deployment_status,
@@ -9,7 +10,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use axum::{Router, routing::{get, post}};
-use log::info;
+use log::{info, warn};
 use std::{fs, sync::Arc};
 
 extern crate redis;
@@ -24,6 +25,55 @@ mod models;
 mod redis_manager;
 mod routes;
 mod shutdown;
+
+fn cleanup_managed_containers_sync() -> Result<()> {
+    let output = std::process::Command::new("docker")
+        .args(["ps", "-aq", "--filter", "label=serverless.managed=true"])
+        .output()
+        .context("Failed to list managed containers")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if !stderr.is_empty() {
+            return Err(anyhow::anyhow!(stderr));
+        }
+        return Err(anyhow::anyhow!("docker ps failed"));
+    }
+
+    let ids = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    let status = std::process::Command::new("docker")
+        .arg("rm")
+        .arg("-f")
+        .args(ids)
+        .status()
+        .context("Failed to remove managed containers")?;
+
+    if !status.success() {
+        return Err(anyhow::anyhow!("docker rm -f failed"));
+    }
+
+    Ok(())
+}
+
+fn install_panic_cleanup_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        if let Err(err) = cleanup_managed_containers_sync() {
+            eprintln!("panic cleanup failed for containers ({MANAGED_CONTAINER_LABEL}): {err}");
+        }
+        default_hook(panic_info);
+    }));
+}
 
 fn read_function_paths() -> Vec<String> {
     fs::read_dir("functions")
@@ -57,6 +107,14 @@ impl AppState {
 #[tokio::main]
 async fn main() -> Result<()> {
     setup_logger()?;
+    install_panic_cleanup_hook();
+
+    if let Err(err) = cleanup_managed_containers_sync() {
+        warn!(
+            "Startup cleanup failed for containers ({}): {}",
+            MANAGED_CONTAINER_LABEL, err
+        );
+    }
 
     let paths = read_function_paths();
     info!("Read function paths");

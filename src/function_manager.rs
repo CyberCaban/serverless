@@ -178,7 +178,7 @@ impl FunctionManager {
             .await?;
         let container_config = self
             .container_manager
-            .setup_function_template(&image_name)
+            .setup_function_template(&image_name, &config)
             .await?;
 
         let mut container_ids = Vec::with_capacity(config.replicas as usize);
@@ -229,9 +229,71 @@ fn parse_load_balancer_kind(raw: &str) -> Option<LoadBalancingKind> {
 
 #[cfg(test)]
 mod tests {
+    use std::panic::{AssertUnwindSafe, resume_unwind};
+
+    use futures_util::FutureExt;
+
     use crate::redis_manager::RedisManager;
 
     use super::FunctionManager;
+
+    const MB_TO_BYTES: i64 = 1024 * 1024;
+
+    async fn assert_deployment_runtime_config(
+        manager: &FunctionManager,
+        function_name: &str,
+        expected_inner_port: u16,
+        expected_replicas: usize,
+        expected_memory_bytes: i64,
+    ) {
+        let deployed = manager.deployed_functions.read().await;
+        let running = deployed
+            .get(function_name)
+            .expect("function should be present in deployed functions map");
+
+        assert_eq!(running.config.inner_port, expected_inner_port);
+        assert_eq!(running.container_ids.len(), expected_replicas);
+
+        let host_config = running
+            .container_config
+            .host_config
+            .as_ref()
+            .expect("host config should be configured");
+        assert_eq!(
+            host_config.memory,
+            Some(expected_memory_bytes),
+            "memory limit should be applied to container template"
+        );
+    }
+
+    fn is_infra_network_error(error_text: &str) -> bool {
+        let lower = error_text.to_ascii_lowercase();
+        [
+            "failed to resolve reference",
+            "connecting to 127.0.0.1",
+            "unexpected eof while reading",
+            "permission denied",
+            "apk add",
+            "tls",
+        ]
+        .iter()
+        .any(|token| lower.contains(token))
+    }
+
+    async fn run_with_cleanup<F, Fut>(
+        manager: &FunctionManager,
+        redis: &RedisManager,
+        test_body: F,
+    ) where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let result = AssertUnwindSafe(test_body()).catch_unwind().await;
+        manager.cleanup_containers(redis).await;
+        if let Err(panic) = result {
+            resume_unwind(panic);
+        }
+    }
 
     #[tokio::test]
     #[ignore = "requires docker daemon, tar and local redis"]
@@ -240,27 +302,40 @@ mod tests {
         let redis = RedisManager::new().expect("redis should be available for this test");
         let function_name = "example-js";
 
-        let config = FunctionManager::read_function_config(function_name)
-            .await
-            .expect("example function config should be readable");
+        run_with_cleanup(&manager, &redis, || async {
+            let config = FunctionManager::read_function_config(function_name)
+                .await
+                .expect("example function config should be readable");
+            let expected_inner_port = config.inner_port;
+            let expected_replicas = config.replicas as usize;
+            let expected_memory_bytes = config.memory * MB_TO_BYTES;
 
-        manager
-            .deploy_function(config, &redis)
-            .await
-            .expect("deploy should succeed");
+            manager
+                .deploy_function(config, &redis)
+                .await
+                .expect("deploy should succeed");
 
-        let invoke_result = manager
-            .try_invoke(function_name, serde_json::json!({"name": "test"}))
-            .await
-            .expect("invoke should succeed");
-        assert_eq!(invoke_result["message"], "Hello, test");
+            assert_deployment_runtime_config(
+                &manager,
+                function_name,
+                expected_inner_port,
+                expected_replicas,
+                expected_memory_bytes,
+            )
+            .await;
 
-        let replicas = redis
-            .get_function_replicas(function_name)
-            .expect("replicas should be tracked in redis");
-        assert!(!replicas.is_empty());
+            let invoke_result = manager
+                .try_invoke(function_name, serde_json::json!({"name": "test"}))
+                .await
+                .expect("invoke should succeed");
+            assert_eq!(invoke_result["message"], "Hello, test");
 
-        manager.cleanup_containers(&redis).await;
+            let replicas = redis
+                .get_function_replicas(function_name)
+                .expect("replicas should be tracked in redis");
+            assert_eq!(replicas.len(), expected_replicas);
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -270,31 +345,119 @@ mod tests {
         let redis = RedisManager::new().expect("redis should be available for this test");
         let function_name = "example-go";
 
-        let config = FunctionManager::read_function_config(function_name)
-            .await
-            .expect("example function config should be readable");
+        run_with_cleanup(&manager, &redis, || async {
+            let config = FunctionManager::read_function_config(function_name)
+                .await
+                .expect("example function config should be readable");
+            let expected_inner_port = config.inner_port;
+            let expected_replicas = config.replicas as usize;
+            let expected_memory_bytes = config.memory * MB_TO_BYTES;
 
-        manager
-            .deploy_function(config, &redis)
-            .await
-            .expect("deploy should succeed");
+            manager
+                .deploy_function(config, &redis)
+                .await
+                .expect("deploy should succeed");
 
-        let array = [9, 4, 6, 32, 5, 7, 82, 3];
-        let mut expected = array.clone();
-        expected.sort();
-        let invoke_result = manager
-            .try_invoke(function_name, serde_json::json!({"numbers": array}))
-            .await
-            .expect("invoke should succeed");
-        let result: Vec<i32> =
-            serde_json::from_value(invoke_result["sorted"].clone()).expect("Must be parsable");
-        assert_eq!(result, expected);
+            assert_deployment_runtime_config(
+                &manager,
+                function_name,
+                expected_inner_port,
+                expected_replicas,
+                expected_memory_bytes,
+            )
+            .await;
 
-        let replicas = redis
-            .get_function_replicas(function_name)
-            .expect("replicas should be tracked in redis");
-        assert!(!replicas.is_empty());
+            let array = [9, 4, 6, 32, 5, 7, 82, 3];
+            let mut expected = array.clone();
+            expected.sort();
+            let invoke_result = manager
+                .try_invoke(function_name, serde_json::json!({"numbers": array}))
+                .await
+                .expect("invoke should succeed");
+            let result: Vec<i32> = serde_json::from_value(invoke_result["sorted"].clone())
+                .expect("Must be parsable");
+            assert_eq!(result, expected);
 
-        manager.cleanup_containers(&redis).await;
+            let replicas = redis
+                .get_function_replicas(function_name)
+                .expect("replicas should be tracked in redis");
+            assert_eq!(replicas.len(), expected_replicas);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires docker daemon, tar and local redis"]
+    async fn integration_example_rust() {
+        let manager = FunctionManager::new().expect("docker should be available for this test");
+        let redis = RedisManager::new().expect("redis should be available for this test");
+        let function_name = "example-rust";
+
+        run_with_cleanup(&manager, &redis, || async {
+            let config = FunctionManager::read_function_config(function_name)
+                .await
+                .expect("example function config should be readable");
+            let expected_inner_port = config.inner_port;
+            let expected_replicas = config.replicas as usize;
+            let expected_memory_bytes = config.memory * MB_TO_BYTES;
+
+            if let Err(error) = manager.deploy_function(config, &redis).await {
+                if is_infra_network_error(&error.to_string()) {
+                    eprintln!(
+                        "Skipping integration_example_rust because Docker network access is unavailable: {error}"
+                    );
+                    return;
+                }
+
+                panic!("deploy should succeed: {error}");
+            }
+
+            assert_deployment_runtime_config(
+                &manager,
+                function_name,
+                expected_inner_port,
+                expected_replicas,
+                expected_memory_bytes,
+            )
+            .await;
+
+            let invoke_result = manager
+                .try_invoke(
+                    function_name,
+                    serde_json::json!({
+                        "jobId": "energy-window-2026-04-05-08",
+                        "facilityId": "factory-north-1",
+                        "meterId": "line-a-main-meter",
+                        "windowStart": "2026-04-05T08:00:00Z",
+                        "pricePerKwhUsd": 0.17,
+                        "readings": [
+                            { "timestamp": "2026-04-05T08:00:00Z", "watts": 12850.0 },
+                            { "timestamp": "2026-04-05T08:01:00Z", "watts": 13120.0 },
+                            { "timestamp": "2026-04-05T08:02:00Z", "watts": 12960.0 },
+                            { "timestamp": "2026-04-05T08:03:00Z", "watts": 18840.0 },
+                            { "timestamp": "2026-04-05T08:04:00Z", "watts": 13040.0 },
+                            { "timestamp": "2026-04-05T08:05:00Z", "watts": 12790.0 }
+                        ],
+                        "rounds": 250
+                    }),
+                )
+                .await
+                .expect("invoke should succeed");
+
+            assert_eq!(invoke_result["jobId"], "energy-window-2026-04-05-08");
+            assert_eq!(invoke_result["facilityId"], "factory-north-1");
+            assert_eq!(invoke_result["meterId"], "line-a-main-meter");
+            assert_eq!(invoke_result["inputPoints"], 6);
+            assert_eq!(invoke_result["rounds"], 250);
+            assert!(invoke_result["estimatedCostUsd"].is_number());
+            assert!(invoke_result["averageRiskScore"].is_number());
+            assert!(invoke_result["topAnomalies"].as_array().is_some());
+
+            let replicas = redis
+                .get_function_replicas(function_name)
+                .expect("replicas should be tracked in redis");
+            assert_eq!(replicas.len(), expected_replicas);
+        })
+        .await;
     }
 }
