@@ -325,10 +325,43 @@ mod tests {
             .await;
 
             let invoke_result = manager
-                .try_invoke(function_name, serde_json::json!({"name": "test"}))
+                .try_invoke(
+                    function_name,
+                    serde_json::json!({
+                        "orderId": "order-1001",
+                        "customer": {
+                            "name": "Test User",
+                            "email": "test@example.com"
+                        },
+                        "shippingCountry": "US",
+                        "couponCode": "WELCOME10",
+                        "expedited": false,
+                        "items": [
+                            { "sku": "SKU-1", "name": "Widget", "quantity": 2, "price": 10.0 },
+                            { "sku": "SKU-2", "name": "Cable", "quantity": 1, "price": 20.0 }
+                        ]
+                    }),
+                )
                 .await
                 .expect("invoke should succeed");
-            assert_eq!(invoke_result["message"], "Hello, test");
+
+            let response_payload = invoke_result
+                .get("result")
+                .cloned()
+                .unwrap_or_else(|| invoke_result.clone());
+            assert!(
+                response_payload.get("error").is_none(),
+                "example-js returned error payload: {response_payload}"
+            );
+            assert_eq!(response_payload["orderId"], "order-1001");
+            assert_eq!(response_payload["customer"]["name"], "Test User");
+            assert_eq!(response_payload["pricing"]["subtotal"], 40.0);
+            assert_eq!(response_payload["pricing"]["discount"], 4.0);
+            assert_eq!(response_payload["pricing"]["shipping"], 5.99);
+            assert_eq!(response_payload["pricing"]["tax"], 3.36);
+            assert_eq!(response_payload["pricing"]["total"], 45.35);
+            assert_eq!(response_payload["fulfillment"]["couponApplied"], "WELCOME10");
+            assert_eq!(response_payload["items"].as_array().map(Vec::len), Some(2));
 
             let replicas = redis
                 .get_function_replicas(function_name)
