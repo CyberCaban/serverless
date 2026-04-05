@@ -8,17 +8,17 @@ use bollard::query_parameters::{ListNetworksOptions, ListVolumesOptions};
 use bollard::secret::{Mount, NetworkCreateRequest, VolumeCreateOptions};
 use bollard::{
     Docker, body_full,
-    exec::StartExecOptions,
     query_parameters::{
         self, BuildImageOptionsBuilder, CreateContainerOptionsBuilder,
         RemoveContainerOptionsBuilder,
     },
-    secret::{ContainerCreateBody, ExecConfig, HostConfig, PortBinding},
+    secret::{ContainerCreateBody, HostConfig, PortBinding},
 };
 use futures_util::StreamExt;
 use log::{error, info, warn};
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
+use tokio::time::{Duration, sleep};
 
 use crate::errors::deploy_error::DeployError;
 use crate::function_manager::FunctionConfig;
@@ -37,71 +37,98 @@ type ContainerId = String;
 #[derive(Debug)]
 pub struct ContainerManager {
     docker: Docker,
+    http_client: reqwest::Client,
 }
 impl ContainerManager {
     pub fn new() -> Result<Self> {
         let docker = Docker::connect_with_local_defaults()?;
-        Ok(Self { docker })
+        let http_client = reqwest::Client::builder()
+            .pool_idle_timeout(Duration::from_secs(90))
+            .pool_max_idle_per_host(64)
+            .build()?;
+        Ok(Self {
+            docker,
+            http_client,
+        })
     }
 
-    pub async fn try_invoke_http(
-        &self,
-        container_id: &str,
-        inner_port: u16,
-        payload: &Value,
-    ) -> Result<Value> {
-        self.try_invoke_with_exec(container_id, inner_port, payload).await
-    }
+    pub async fn try_invoke_http(&self, host_port: u16, payload: &Value) -> Result<Value> {
+        let url = format!("http://127.0.0.1:{host_port}/");
+        let mut last_error: Option<anyhow::Error> = None;
 
-    async fn try_invoke_with_exec(
-        &self,
-        container_id: &str,
-        inner_port: u16,
-        payload: &Value,
-    ) -> Result<Value> {
-        let payload_json = serde_json::to_string(payload)?;
-        let url = format!("http://localhost:{inner_port}/");
-
-        let curl_command = [
-            "curl",
-            "-s",
-            "-X",
-            "POST",
-            &url,
-            "-H",
-            "Content-Type: application/json",
-            "-d",
-            &payload_json,
-        ]
-        .iter()
-        .map(|value| value.to_string())
-        .collect();
-
-        let config = ExecConfig {
-            attach_stdout: Some(true),
-            attach_stderr: Some(true),
-            cmd: Some(curl_command),
-            ..Default::default()
-        };
-
-        let exec = self.docker.create_exec(container_id, config).await?;
-
-        let output = self
-            .docker
-            .start_exec(&exec.id, None::<StartExecOptions>)
-            .await?;
-
-        let mut full_output: Vec<u8> = Vec::new();
-        if let bollard::exec::StartExecResults::Attached { mut output, .. } = output {
-            while let Some(log_output) = output.next().await {
-                if let Ok(msg) = log_output {
-                    full_output.extend(msg.into_bytes());
+        for attempt in 0..8 {
+            match self.http_client.post(&url).json(payload).send().await {
+                Ok(response) => {
+                    let status = response.status();
+                    let body = response.text().await?;
+                    if !status.is_success() {
+                        bail!("invoke failed with status {status}: {body}");
+                    }
+                    return Self::parse_invoke_body(&body);
+                }
+                Err(error) => {
+                    last_error = Some(anyhow!(error));
+                    if attempt < 7 {
+                        sleep(Duration::from_millis(50)).await;
+                    }
                 }
             }
         }
 
-        let raw_output = String::from_utf8_lossy(&full_output).trim().to_string();
-        Self::parse_invoke_body(&raw_output)
+        Err(last_error.unwrap_or_else(|| anyhow!("invoke failed for unknown reason")))
+    }
+
+    pub async fn get_published_host_port(&self, container_id: &str, inner_port: u16) -> Result<u16> {
+        let details = self
+            .docker
+            .inspect_container(
+                container_id,
+                None::<query_parameters::InspectContainerOptions>,
+            )
+            .await?;
+
+        let mut found_host_port: Option<String> = None;
+        if let Some(ports) = details.network_settings.and_then(|settings| settings.ports) {
+            for key in [format!("{inner_port}/tcp"), inner_port.to_string()] {
+                if let Some(Some(bindings)) = ports.get(&key) {
+                    if let Some(binding) = bindings.first() {
+                        if let Some(host_port) = binding.host_port.clone() {
+                            found_host_port = Some(host_port);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        let host_port = if let Some(host_port) = found_host_port {
+            host_port
+        } else {
+            let output = tokio::process::Command::new("docker")
+                .arg("port")
+                .arg(container_id)
+                .arg(format!("{inner_port}/tcp"))
+                .output()
+                .await?;
+
+            if !output.status.success() {
+                bail!("No published host port found for {container_id}:{inner_port}");
+            }
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let candidate = stdout
+                .trim()
+                .split(':')
+                .next_back()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| anyhow!("No published host port found for {container_id}:{inner_port}"))?;
+            candidate.to_string()
+        };
+
+        host_port
+            .parse::<u16>()
+            .map_err(|e| anyhow!("Invalid host port '{host_port}' for container {container_id}: {e}"))
     }
 
     fn parse_invoke_body(raw: &str) -> Result<Value> {
@@ -267,14 +294,23 @@ impl ContainerManager {
         let host_config = HostConfig {
             mounts: Some(mounts),
             network_mode: Some(resource_name),
+            port_bindings: Some(HashMap::from([(
+                format!("{}/tcp", function_config.inner_port),
+                Some(vec![PortBinding {
+                    host_ip: Some("0.0.0.0".to_string()),
+                    host_port: Some("0".to_string()),
+                }]),
+            )])),
             memory: Some(function_config.memory * MB_TO_BYTES),
             ..Default::default()
         };
         info!("Creating container template for '{image_name}'");
+        let exposed_ports = HashMap::from([(format!("{}/tcp", function_config.inner_port), HashMap::new())]);
         Ok(ContainerCreateBody {
             image: Some(image_name.to_string()),
             labels: Some(managed_container_labels()),
             host_config: Some(host_config),
+            exposed_ports: Some(exposed_ports),
             ..Default::default()
         })
     }

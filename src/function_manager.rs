@@ -55,6 +55,7 @@ pub struct RunningFunction {
     pub config: FunctionConfig,
     pub container_config: ContainerCreateBody,
     pub container_ids: Vec<String>,
+    pub host_ports_by_container: HashMap<String, u16>,
 }
 
 pub struct InvokeOutcome {
@@ -88,12 +89,15 @@ impl FunctionManager {
         function_name: &str,
         payload: Value,
     ) -> Result<InvokeOutcome> {
-        let (container_ids, inner_port) = {
+        let (container_ids, host_ports_by_container) = {
             let guard = self.deployed_functions.read().await;
             let config = guard
                 .get(function_name)
                 .ok_or(FunctionError::FunctionNotDeployed)?;
-            (config.container_ids.clone(), config.config.inner_port)
+            (
+                config.container_ids.clone(),
+                config.host_ports_by_container.clone(),
+            )
         };
 
         let load_balancer = {
@@ -107,10 +111,12 @@ impl FunctionManager {
         let container_id =
             load_balancer.select_container(function_name, &container_ids, Some(&payload))?;
 
-        let result = self
-            .container_manager
-            .try_invoke_http(&container_id, inner_port, &payload)
-            .await;
+        let host_port = host_ports_by_container
+            .get(&container_id)
+            .copied()
+            .ok_or_else(|| anyhow!("Host port not found for container {container_id}"))?;
+
+        let result = self.container_manager.try_invoke_http(host_port, &payload).await;
 
         load_balancer.on_invocation_finished(function_name, &container_id, result.is_ok());
 
@@ -146,6 +152,7 @@ impl FunctionManager {
         let mut should_remove_balancer = false;
         if let Some(function) = self.deployed_functions.write().await.get_mut(function_name) {
             function.container_ids.retain(|id| id != container_id);
+            function.host_ports_by_container.remove(container_id);
             should_remove_balancer = function.container_ids.is_empty();
         }
         if should_remove_balancer {
@@ -243,6 +250,7 @@ impl FunctionManager {
             .await?;
 
         let mut container_ids = Vec::with_capacity(config.replicas as usize);
+        let mut host_ports_by_container = HashMap::with_capacity(config.replicas as usize);
         for _ in 0..config.replicas {
             let container_id = self
                 .container_manager
@@ -251,6 +259,11 @@ impl FunctionManager {
             self.container_manager
                 .start_container(&container_id)
                 .await?;
+            let host_port = self
+                .container_manager
+                .get_published_host_port(&container_id, config.inner_port)
+                .await?;
+            host_ports_by_container.insert(container_id.clone(), host_port);
             container_ids.push(container_id);
         }
 
@@ -268,6 +281,7 @@ impl FunctionManager {
             config,
             container_config,
             container_ids: container_ids.clone(),
+            host_ports_by_container,
         };
         redis_manager.replace_function_replicas(&function.config.name, &container_ids)?;
         running_containers.insert(function.config.name.clone(), function);
