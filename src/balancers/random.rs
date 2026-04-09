@@ -1,6 +1,5 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use crate::errors::function_error::FunctionError;
+use rand::Rng;
 use serde_json::Value;
 
 use super::LoadBalancingStrategy;
@@ -25,11 +24,8 @@ impl LoadBalancingStrategy for RandomBalancer {
             return Err(FunctionError::NoRunningContainers);
         }
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as usize;
-        let index = now % container_ids.len();
+        let mut rng = rand::rng();
+        let index = rng.random_range(0..container_ids.len());
         Ok(container_ids[index].clone())
     }
 }
@@ -38,12 +34,20 @@ impl LoadBalancingStrategy for RandomBalancer {
 mod tests {
     use super::RandomBalancer;
     use crate::balancers::LoadBalancingStrategy;
+    use std::collections::HashSet;
 
     #[test]
     fn random_always_returns_existing_container() {
         let balancer = RandomBalancer::new();
         let replicas = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let selected = balancer.select_container("example", &replicas, None).unwrap();
-        assert!(replicas.contains(&selected));
+        let mut selected = HashSet::new();
+
+        for _ in 0..50 {
+            let choice = balancer.select_container("example", &replicas, None).unwrap();
+            assert!(replicas.contains(&choice));
+            selected.insert(choice);
+        }
+
+        assert!(selected.len() > 1, "random balancer should not stick to one container");
     }
 }

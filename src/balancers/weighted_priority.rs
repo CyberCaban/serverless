@@ -1,6 +1,7 @@
-use std::{collections::HashMap, sync::{Arc, Mutex}, time::{SystemTime, UNIX_EPOCH}};
+use std::{collections::HashMap, sync::{Arc, Mutex}};
 
 use crate::errors::function_error::FunctionError;
+use rand::Rng;
 use serde_json::Value;
 
 use super::{LoadBalancingStrategy, sync_container_map};
@@ -107,12 +108,9 @@ impl LoadBalancingStrategy for WeightedPriorityBalancer {
                 }
             }
 
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as usize;
+            let mut rng = rand::rng();
             weighted_candidates
-                .get(now % weighted_candidates.len())
+                .get(rng.random_range(0..weighted_candidates.len()))
                 .cloned()
                 .ok_or(FunctionError::NoRunningContainers)?
         };
