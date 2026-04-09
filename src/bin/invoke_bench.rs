@@ -4,7 +4,15 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
+use tokio::sync::mpsc;
+use tokio::time::{Instant as TokioInstant, sleep_until};
+
+#[derive(Clone, Copy, Debug)]
+enum LoadPattern {
+    Stable,
+    Pulse,
+    Stress,
+}
 
 #[derive(Debug)]
 struct BenchConfig {
@@ -14,6 +22,17 @@ struct BenchConfig {
     concurrency: usize,
     request_timeout_ms: u64,
     output_path: String,
+    load_pattern: LoadPattern,
+    target_rps: f64,
+    low_rps: f64,
+    high_rps: f64,
+    pulse_period_secs: u64,
+}
+
+#[derive(Debug)]
+struct BenchJob {
+    worker_id: usize,
+    seq: u64,
 }
 
 #[derive(Default, Debug)]
@@ -29,6 +48,7 @@ struct WorkerStats {
 struct BenchReport {
     target_function: String,
     base_url: String,
+    load_pattern: LoadPatternReport,
     duration_secs: u64,
     concurrency: usize,
     request_timeout_ms: u64,
@@ -42,6 +62,15 @@ struct BenchReport {
     latency_ms: LatencyMetrics,
     load_distribution: LoadDistribution,
     generated_at_unix_ms: u128,
+}
+
+#[derive(Debug, Serialize)]
+struct LoadPatternReport {
+    kind: String,
+    target_rps: Option<f64>,
+    low_rps: Option<f64>,
+    high_rps: Option<f64>,
+    pulse_period_secs: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -70,6 +99,11 @@ fn parse_args() -> BenchConfig {
     let mut concurrency = 20_usize;
     let mut request_timeout_ms = 2_500_u64;
     let mut output_path = "bench_report.json".to_string();
+    let mut load_pattern = LoadPattern::Stress;
+    let mut target_rps = 100.0_f64;
+    let mut low_rps = 50.0_f64;
+    let mut high_rps = 200.0_f64;
+    let mut pulse_period_secs = 5_u64;
 
     let args: Vec<String> = std::env::args().collect();
     let mut index = 1;
@@ -87,6 +121,27 @@ fn parse_args() -> BenchConfig {
                 request_timeout_ms = args[index + 1].parse().unwrap_or(request_timeout_ms);
             }
             "--output" => output_path = args[index + 1].clone(),
+            "--pattern" => {
+                let value = args[index + 1].to_ascii_lowercase();
+                load_pattern = match value.as_str() {
+                    "stable" => LoadPattern::Stable,
+                    "pulse" | "pulsating" => LoadPattern::Pulse,
+                    "stress" => LoadPattern::Stress,
+                    _ => LoadPattern::Stress,
+                };
+            }
+            "--target-rps" => {
+                target_rps = args[index + 1].parse().unwrap_or(target_rps);
+            }
+            "--low-rps" => {
+                low_rps = args[index + 1].parse().unwrap_or(low_rps);
+            }
+            "--high-rps" => {
+                high_rps = args[index + 1].parse().unwrap_or(high_rps);
+            }
+            "--pulse-period-secs" => {
+                pulse_period_secs = args[index + 1].parse().unwrap_or(pulse_period_secs);
+            }
             _ => {}
         }
         index += 2;
@@ -99,6 +154,11 @@ fn parse_args() -> BenchConfig {
         concurrency,
         request_timeout_ms,
         output_path,
+        load_pattern,
+        target_rps,
+        low_rps,
+        high_rps,
+        pulse_period_secs,
     }
 }
 
@@ -154,18 +214,15 @@ fn default_payload(function_name: &str, worker_id: usize, seq: u64) -> Value {
 }
 
 async fn run_worker(
-    worker_id: usize,
+    mut receiver: mpsc::Receiver<BenchJob>,
     client: Client,
     cfg: Arc<BenchConfig>,
-    deadline: Instant,
-    sequence: Arc<AtomicU64>,
 ) -> WorkerStats {
     let mut stats = WorkerStats::default();
     let endpoint = format!("{}/invoke/{}", cfg.base_url, cfg.function_name);
 
-    while Instant::now() < deadline {
-        let seq = sequence.fetch_add(1, Ordering::Relaxed);
-        let payload = default_payload(&cfg.function_name, worker_id, seq);
+    while let Some(job) = receiver.recv().await {
+        let payload = default_payload(&cfg.function_name, job.worker_id, job.seq);
 
         let started = Instant::now();
         let response = client.post(&endpoint).json(&payload).send().await;
@@ -207,6 +264,82 @@ async fn run_worker(
     }
 
     stats
+}
+
+fn current_pulse_rps(cfg: &BenchConfig, elapsed: Duration) -> f64 {
+    let period = Duration::from_secs(cfg.pulse_period_secs.max(1));
+    let phase = (elapsed.as_secs_f64() / period.as_secs_f64()).floor() as u64;
+    if phase.is_multiple_of(2) {
+        cfg.high_rps.max(0.1)
+    } else {
+        cfg.low_rps.max(0.1)
+    }
+}
+
+async fn run_producer(
+    cfg: Arc<BenchConfig>,
+    senders: Vec<mpsc::Sender<BenchJob>>,
+    deadline: TokioInstant,
+    sequence: Arc<AtomicU64>,
+) {
+    let start = TokioInstant::now();
+    let mut last_tick = TokioInstant::now();
+    let mut token_budget = 0.0_f64;
+
+    loop {
+        let now = TokioInstant::now();
+        if now >= deadline {
+            break;
+        }
+
+        match cfg.load_pattern {
+            LoadPattern::Stress => {
+                let seq = sequence.fetch_add(1, Ordering::Relaxed);
+                let worker_id = (seq as usize) % cfg.concurrency;
+                let job = BenchJob { worker_id, seq };
+                if senders[worker_id].send(job).await.is_err() {
+                    break;
+                }
+                continue;
+            }
+            LoadPattern::Stable | LoadPattern::Pulse => {
+                let elapsed_since_tick = now.duration_since(last_tick).as_secs_f64();
+                last_tick = now;
+
+                let rate_rps = match cfg.load_pattern {
+                    LoadPattern::Stable => cfg.target_rps.max(0.1),
+                    LoadPattern::Pulse => current_pulse_rps(&cfg, now.duration_since(start)),
+                    LoadPattern::Stress => unreachable!(),
+                };
+
+                token_budget += rate_rps * elapsed_since_tick;
+                let mut to_dispatch = token_budget.floor() as usize;
+
+                if to_dispatch == 0 {
+                    // Tokio timers are not microsecond-precise on all platforms;
+                    // produce in short ticks and accumulate tokens instead.
+                    sleep_until((now + Duration::from_millis(1)).min(deadline)).await;
+                    continue;
+                }
+
+                // Prevent unbounded bursts if loop was paused for too long.
+                to_dispatch = to_dispatch.min(20_000);
+
+                let mut dispatched = 0_usize;
+                for _ in 0..to_dispatch {
+                    let seq = sequence.fetch_add(1, Ordering::Relaxed);
+                    let worker_id = (seq as usize) % cfg.concurrency;
+                    let job = BenchJob { worker_id, seq };
+                    if senders[worker_id].send(job).await.is_err() {
+                        return;
+                    }
+                    dispatched += 1;
+                }
+
+                token_budget -= dispatched as f64;
+            }
+        }
+    }
 }
 
 fn merge_worker_stats(all: Vec<WorkerStats>) -> WorkerStats {
@@ -286,35 +419,45 @@ async fn main() -> anyhow::Result<()> {
         .timeout(Duration::from_millis(cfg.request_timeout_ms))
         .build()?;
 
-    let deadline = Instant::now() + Duration::from_secs(cfg.duration_secs);
+    let deadline = TokioInstant::now() + Duration::from_secs(cfg.duration_secs);
     let sequence = Arc::new(AtomicU64::new(0));
 
-    let all_stats = Arc::new(Mutex::new(Vec::with_capacity(cfg.concurrency)));
     let mut handles = Vec::with_capacity(cfg.concurrency);
+    let mut senders = Vec::with_capacity(cfg.concurrency);
 
-    let bench_started = Instant::now();
     for worker_id in 0..cfg.concurrency {
+        let (sender, receiver) = mpsc::channel::<BenchJob>(1024);
+        senders.push(sender);
+
         let worker_client = client.clone();
         let worker_cfg = Arc::clone(&cfg);
-        let worker_sequence = Arc::clone(&sequence);
-        let worker_deadline = deadline;
-        let worker_all_stats = Arc::clone(&all_stats);
 
         handles.push(tokio::spawn(async move {
-            let stats =
-                run_worker(worker_id, worker_client, worker_cfg, worker_deadline, worker_sequence)
-                    .await;
-            worker_all_stats.lock().await.push(stats);
+            let _ = worker_id;
+            run_worker(receiver, worker_client, worker_cfg).await
         }));
     }
 
+    let producer_cfg = Arc::clone(&cfg);
+    let producer_sequence = Arc::clone(&sequence);
+    let producer_senders = senders;
+    let producer_handle = tokio::spawn(async move {
+        run_producer(producer_cfg, producer_senders, deadline, producer_sequence).await;
+    });
+
+    let bench_started = Instant::now();
+
+    let _ = producer_handle.await;
+
+    let mut collected_stats = Vec::with_capacity(cfg.concurrency);
     for handle in handles {
-        let _ = handle.await;
+        if let Ok(stats) = handle.await {
+            collected_stats.push(stats);
+        }
     }
 
     let elapsed_secs = bench_started.elapsed().as_secs_f64();
-    let all = all_stats.lock().await.drain(..).collect::<Vec<_>>();
-    let mut merged = merge_worker_stats(all);
+    let mut merged = merge_worker_stats(collected_stats);
 
     merged
         .latencies_ms
@@ -370,6 +513,18 @@ async fn main() -> anyhow::Result<()> {
     let report = BenchReport {
         target_function: cfg.function_name.clone(),
         base_url: cfg.base_url.clone(),
+        load_pattern: LoadPatternReport {
+            kind: match cfg.load_pattern {
+                LoadPattern::Stable => "stable".to_string(),
+                LoadPattern::Pulse => "pulse".to_string(),
+                LoadPattern::Stress => "stress".to_string(),
+            },
+            target_rps: matches!(cfg.load_pattern, LoadPattern::Stable).then_some(cfg.target_rps),
+            low_rps: matches!(cfg.load_pattern, LoadPattern::Pulse).then_some(cfg.low_rps),
+            high_rps: matches!(cfg.load_pattern, LoadPattern::Pulse).then_some(cfg.high_rps),
+            pulse_period_secs: matches!(cfg.load_pattern, LoadPattern::Pulse)
+                .then_some(cfg.pulse_period_secs),
+        },
         duration_secs: cfg.duration_secs,
         concurrency: cfg.concurrency,
         request_timeout_ms: cfg.request_timeout_ms,
