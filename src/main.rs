@@ -11,7 +11,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use axum::{Router, routing::{get, patch, post}};
-use log::{info, warn};
+use log::{error, info, warn};
 use std::{fs, sync::Arc};
 
 extern crate redis;
@@ -52,14 +52,24 @@ fn cleanup_managed_containers_sync() -> Result<()> {
         return Ok(());
     }
 
-    let status = std::process::Command::new("docker")
+    let output = std::process::Command::new("docker")
         .arg("rm")
         .arg("-f")
         .args(ids)
-        .status()
+        .output()
         .context("Failed to remove managed containers")?;
 
-    if !status.success() {
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !stdout.is_empty() {
+        info!("Managed container cleanup output: {}", stdout);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        warn!("Managed container cleanup stderr: {}", stderr);
+    }
+
+    if !output.status.success() {
         return Err(anyhow::anyhow!("docker rm -f failed"));
     }
 
@@ -70,7 +80,10 @@ fn install_panic_cleanup_hook() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         if let Err(err) = cleanup_managed_containers_sync() {
-            eprintln!("panic cleanup failed for containers ({MANAGED_CONTAINER_LABEL}): {err}");
+            error!(
+                "Panic cleanup failed for containers ({}): {}",
+                MANAGED_CONTAINER_LABEL, err
+            );
         }
         default_hook(panic_info);
     }));
