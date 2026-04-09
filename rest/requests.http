@@ -37,5 +37,47 @@ Content-Type: application/json
 }
 
 
+### Deploy rust analytics function
+POST http://localhost:5000/deploy/example-rust HTTP/1.1
+
+
+### Invoke rust analytics function
+POST http://localhost:5000/invoke/example-rust HTTP/1.1
+Content-Type: application/json
+
+{
+	"jobId": "energy-window-2026-04-05-08",
+	"facilityId": "factory-north-1",
+	"meterId": "line-a-main-meter",
+	"windowStart": "2026-04-05T08:00:00Z",
+	"pricePerKwhUsd": 0.17,
+	"readings": [
+		{ "timestamp": "2026-04-05T08:00:00Z", "watts": 12850.0 },
+		{ "timestamp": "2026-04-05T08:01:00Z", "watts": 13120.0 },
+		{ "timestamp": "2026-04-05T08:02:00Z", "watts": 12960.0 },
+		{ "timestamp": "2026-04-05T08:03:00Z", "watts": 18840.0 },
+		{ "timestamp": "2026-04-05T08:04:00Z", "watts": 13040.0 },
+		{ "timestamp": "2026-04-05T08:05:00Z", "watts": 12790.0 }
+	],
+	"rounds": 900
+}
+
+
+### Update example-rust config
+PATCH http://localhost:5000/functions/example-rust HTTP/1.1
+Content-Type: application/json
+
+{
+	"memory": 512,
+	"replicas": 4,
+	"loadBalancer": "weighted_priority",
+	"replicaWeights": [3, 1, 1, 1]
+}
+
+
+### Stop function and remove its containers
+POST http://localhost:5000/functions/example-rust/stop HTTP/1.1
+
+
 ### Show all deployed functions
 GET http://localhost:5000/functions HTTP/1.1
